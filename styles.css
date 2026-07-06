@@ -1,0 +1,270 @@
+:root {
+  --ink: #f6efe2;
+  --muted: #c9d7df;
+  --panel: rgba(15, 20, 24, 0.74);
+  --panel-strong: rgba(8, 12, 16, 0.88);
+  --line: rgba(255, 255, 255, 0.16);
+  --accent: #7be0c3;
+  --warn: #eebf6b;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: #0a0e12;
+  color: var(--ink);
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+button {
+  font: inherit;
+}
+
+.game-shell,
+#view {
+  position: fixed;
+  inset: 0;
+}
+
+#view {
+  width: 100vw;
+  height: 100vh;
+  display: block;
+}
+
+.hud {
+  position: fixed;
+  z-index: 3;
+  top: 16px;
+  left: 16px;
+  right: 16px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  pointer-events: none;
+}
+
+.status-panel,
+.side-panel,
+.win-banner {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.34);
+  backdrop-filter: blur(12px);
+}
+
+.status-panel {
+  min-width: min(420px, calc(100vw - 210px));
+  padding: 12px 14px;
+}
+
+.game-title {
+  margin-bottom: 8px;
+  font-size: 18px;
+  font-weight: 750;
+}
+
+.stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.stats span {
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.07);
+  white-space: nowrap;
+}
+
+.stats strong {
+  color: #ffffff;
+  font-weight: 760;
+}
+
+.side-panel {
+  width: 184px;
+  padding: 8px;
+  display: grid;
+  grid-template-columns: 1fr 38px;
+  gap: 8px;
+  pointer-events: auto;
+}
+
+#minimap {
+  width: 130px;
+  height: 130px;
+  display: block;
+  border-radius: 6px;
+  background: #111920;
+}
+
+.icon-button,
+.touch-button,
+.win-banner button {
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.11);
+  cursor: pointer;
+}
+
+.icon-button {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  font-weight: 800;
+}
+
+.icon-button:hover,
+.touch-button:hover,
+.win-banner button:hover {
+  border-color: rgba(123, 224, 195, 0.75);
+  background: rgba(123, 224, 195, 0.2);
+}
+
+.touch-controls {
+  position: fixed;
+  z-index: 4;
+  right: 18px;
+  bottom: 18px;
+  width: 156px;
+  height: 156px;
+  display: none;
+  grid-template-columns: repeat(3, 48px);
+  grid-template-rows: repeat(3, 48px);
+  gap: 6px;
+}
+
+.touch-button {
+  width: 48px;
+  height: 48px;
+  border-radius: 8px;
+  background: var(--panel-strong);
+  font-size: 24px;
+  font-weight: 800;
+  line-height: 1;
+  touch-action: none;
+  user-select: none;
+}
+
+.touch-up {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.touch-left {
+  grid-column: 1;
+  grid-row: 2;
+}
+
+.touch-right {
+  grid-column: 3;
+  grid-row: 2;
+}
+
+.touch-down {
+  grid-column: 2;
+  grid-row: 3;
+}
+
+.win-banner {
+  position: fixed;
+  z-index: 5;
+  left: 50%;
+  bottom: 28px;
+  transform: translateX(-50%);
+  min-width: min(360px, calc(100vw - 32px));
+  padding: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  pointer-events: auto;
+}
+
+.win-banner[hidden] {
+  display: none;
+}
+
+.win-banner span {
+  font-weight: 760;
+}
+
+.win-banner.danger-banner {
+  border-color: rgba(255, 82, 82, 0.62);
+  background: rgba(35, 8, 10, 0.88);
+}
+
+.win-banner.danger-banner button:hover {
+  border-color: rgba(255, 166, 104, 0.82);
+  background: rgba(255, 82, 82, 0.22);
+}
+
+.win-banner button {
+  min-height: 36px;
+  padding: 0 14px;
+  border-radius: 7px;
+  font-weight: 720;
+}
+
+@media (hover: none), (pointer: coarse) {
+  .touch-controls {
+    display: grid;
+  }
+}
+
+@media (max-width: 640px) {
+  .hud {
+    top: 10px;
+    left: 10px;
+    right: 10px;
+  }
+
+  .status-panel {
+    min-width: 0;
+    flex: 1 1 auto;
+    padding: 10px;
+  }
+
+  .side-panel {
+    width: 128px;
+    grid-template-columns: 1fr;
+  }
+
+  #minimap {
+    width: 110px;
+    height: 110px;
+  }
+
+  .icon-button {
+    justify-self: end;
+    width: 34px;
+    height: 34px;
+  }
+
+  .stats {
+    gap: 6px;
+    font-size: 12px;
+  }
+
+  .stats span {
+    min-height: 26px;
+    padding: 4px 7px;
+  }
+}

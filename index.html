@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Labyrinthe 3D</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="game-shell">
+    <canvas id="view" aria-label="Labyrinthe en simili 3D"></canvas>
+
+    <section class="hud" aria-label="Tableau de bord">
+      <div class="status-panel">
+        <div class="game-title">Labyrinthe</div>
+        <div class="stats">
+          <span>Pas <strong id="steps">0</strong></span>
+          <span>Temps <strong id="time">00:00</strong></span>
+          <span id="state">Entree</span>
+        </div>
+      </div>
+
+      <div class="side-panel">
+        <canvas id="minimap" aria-label="Carte du labyrinthe"></canvas>
+        <button id="restart" class="icon-button" type="button" aria-label="Recommencer" title="Recommencer">R</button>
+      </div>
+    </section>
+
+    <nav class="touch-controls" aria-label="Controle tactile">
+      <button data-key="ArrowUp" class="touch-button touch-up" type="button" aria-label="Avancer">&uarr;</button>
+      <button data-key="ArrowLeft" class="touch-button touch-left" type="button" aria-label="Tourner a gauche">&larr;</button>
+      <button data-key="ArrowRight" class="touch-button touch-right" type="button" aria-label="Tourner a droite">&rarr;</button>
+      <button data-key="ArrowDown" class="touch-button touch-down" type="button" aria-label="Reculer">&darr;</button>
+    </nav>
+
+    <div id="win" class="win-banner" hidden>
+      <span>Sortie atteinte</span>
+      <button id="play-again" type="button">Rejouer</button>
+    </div>
+  </main>
+
+  <script src="game.js"></script>
+</body>
+</html>
