@@ -21,6 +21,7 @@ const TILE_EXIT = "X";
 const MONSTER_REPATH_TIME = 0.42;
 const MONSTER_WAKE_TIME = 3.2;
 const MONSTER_CATCH_DISTANCE = 0.46;
+const MONSTER_CELL_CATCH_DISTANCE = 0.82;
 
 const keys = new Set();
 const touchKeys = new Set();
@@ -387,28 +388,45 @@ function updateMonster(dt) {
   if (monster.wake > 0) return;
 
   let remaining = monsterSpeed(monsterDistance()) * dt;
+  if (!monster.path.length && monsterCell.x === playerCell.x && monsterCell.y === playerCell.y) {
+    remaining = moveMonsterToward(player.x, player.y, remaining);
+  }
+
   while (remaining > 0 && monster.path.length) {
     const next = monster.path[0];
     const targetX = next.x + 0.5;
     const targetY = next.y + 0.5;
-    const dx = targetX - monster.x;
-    const dy = targetY - monster.y;
-    const gap = Math.hypot(dx, dy);
+    const before = remaining;
+    remaining = moveMonsterToward(targetX, targetY, remaining);
 
-    if (gap < 0.035) {
+    if (before === remaining) {
       monster.path.shift();
       continue;
     }
 
-    const step = Math.min(remaining, gap);
-    monster.x += dx / gap * step;
-    monster.y += dy / gap * step;
-    remaining -= step;
-
-    if (step >= gap - 0.001) monster.path.shift();
+    if (Math.hypot(targetX - monster.x, targetY - monster.y) < 0.035) monster.path.shift();
   }
 
-  if (monsterDistance() <= MONSTER_CATCH_DISTANCE) catchPlayer();
+  const sameCell = (
+    Math.floor(monster.x) === Math.floor(player.x) &&
+    Math.floor(monster.y) === Math.floor(player.y)
+  );
+  const distance = monsterDistance();
+  if (distance <= MONSTER_CATCH_DISTANCE || (sameCell && distance <= MONSTER_CELL_CATCH_DISTANCE)) {
+    catchPlayer();
+  }
+}
+
+function moveMonsterToward(targetX, targetY, remaining) {
+  const dx = targetX - monster.x;
+  const dy = targetY - monster.y;
+  const gap = Math.hypot(dx, dy);
+  if (gap < 0.001) return remaining;
+
+  const step = Math.min(remaining, gap);
+  monster.x += dx / gap * step;
+  monster.y += dy / gap * step;
+  return remaining - step;
 }
 
 function monsterSpeed(distance) {
@@ -767,12 +785,15 @@ function drawTorches(w, h, dirX, dirY, planeX, planeY, now) {
     const top = h / 2 - torchHeight * 0.76;
     const flameY = top + torchHeight * 0.2;
     const bracketY = top + torchHeight * 0.52;
-    const alpha = Math.max(0.22, Math.min(1, 1.2 - projection.depth * 0.075)) * Math.max(0.18, normalView);
+    const facing = Math.max(0.34, normalView);
+    const haloAlpha = clamp(1.1 - projection.depth * 0.07, 0.24, 1) * facing;
+    const bodyAlpha = 1;
+    const flameAlpha = 1;
     const pulse = 0.92 + Math.sin(now * 0.008 + torch.seed * 17) * 0.08 + Math.sin(now * 0.021 + torch.seed * 31) * 0.045;
 
-    drawTorchHalo(screenX, flameY, torchHeight, pulse, alpha);
-    drawTorchBody(screenX, bracketY, torchWidth, torchHeight, alpha);
-    drawTorchFlame(screenX, flameY, torchHeight * 0.16, pulse, alpha);
+    drawTorchHalo(screenX, flameY, torchHeight, pulse, haloAlpha);
+    drawTorchBody(screenX, bracketY, torchWidth, torchHeight, bodyAlpha);
+    drawTorchFlame(screenX, flameY, torchHeight * 0.16, pulse, flameAlpha);
   }
 }
 
@@ -801,8 +822,8 @@ function drawTorchHalo(x, y, height, pulse, alpha) {
 }
 
 function drawTorchBody(x, y, width, height, alpha) {
-  const stem = Math.max(2, width * 0.13);
-  const plateW = Math.max(8, width * 0.78);
+  const stem = Math.max(3, width * 0.17);
+  const plateW = Math.max(10, width * 0.88);
   const plateH = Math.max(6, height * 0.08);
   const tipY = y - height * 0.28;
   const baseY = y + height * 0.18;
@@ -810,28 +831,60 @@ function drawTorchBody(x, y, width, height, alpha) {
   ctx.save();
   ctx.globalAlpha = alpha;
   ctx.lineCap = "round";
-  ctx.lineWidth = stem;
-  ctx.strokeStyle = "#21150d";
+
+  ctx.fillStyle = "rgba(12, 8, 5, 0.28)";
+  ctx.beginPath();
+  ctx.ellipse(x + width * 0.08, y + height * 0.04, plateW * 0.58, plateH * 1.38, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.lineWidth = stem * 1.55;
+  ctx.strokeStyle = "#120b07";
   ctx.beginPath();
   ctx.moveTo(x, baseY);
   ctx.lineTo(x, tipY);
   ctx.stroke();
 
-  ctx.lineWidth = Math.max(2, stem * 0.72);
-  ctx.strokeStyle = "#6b4629";
+  ctx.lineWidth = stem;
+  ctx.strokeStyle = "#5a3520";
   ctx.beginPath();
-  ctx.moveTo(x - width * 0.28, y - height * 0.02);
-  ctx.lineTo(x + width * 0.28, y - height * 0.02);
+  ctx.moveTo(x, baseY);
+  ctx.lineTo(x, tipY);
   ctx.stroke();
 
-  ctx.fillStyle = "#1a100a";
+  ctx.lineWidth = Math.max(1.4, stem * 0.34);
+  ctx.strokeStyle = "rgba(180, 118, 64, 0.78)";
   ctx.beginPath();
-  ctx.ellipse(x, y + height * 0.02, plateW * 0.5, plateH, 0, 0, Math.PI * 2);
+  ctx.moveTo(x - stem * 0.22, baseY - height * 0.02);
+  ctx.lineTo(x - stem * 0.22, tipY + height * 0.04);
+  ctx.stroke();
+
+  ctx.lineWidth = Math.max(3, stem * 0.95);
+  ctx.strokeStyle = "#120b07";
+  ctx.beginPath();
+  ctx.moveTo(x - width * 0.32, y - height * 0.02);
+  ctx.lineTo(x + width * 0.32, y - height * 0.02);
+  ctx.stroke();
+
+  ctx.lineWidth = Math.max(2, stem * 0.58);
+  ctx.strokeStyle = "#7b4d2b";
+  ctx.beginPath();
+  ctx.moveTo(x - width * 0.3, y - height * 0.025);
+  ctx.lineTo(x + width * 0.3, y - height * 0.025);
+  ctx.stroke();
+
+  ctx.fillStyle = "#120b07";
+  ctx.beginPath();
+  ctx.ellipse(x, y + height * 0.02, plateW * 0.55, plateH * 1.18, 0, 0, Math.PI * 2);
   ctx.fill();
 
-  ctx.fillStyle = "rgba(255, 210, 125, 0.18)";
+  ctx.fillStyle = "#3b2516";
   ctx.beginPath();
-  ctx.ellipse(x - plateW * 0.12, y - plateH * 0.2, plateW * 0.24, plateH * 0.35, 0, 0, Math.PI * 2);
+  ctx.ellipse(x, y + height * 0.01, plateW * 0.42, plateH * 0.76, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = "rgba(255, 210, 125, 0.34)";
+  ctx.beginPath();
+  ctx.ellipse(x - plateW * 0.13, y - plateH * 0.24, plateW * 0.23, plateH * 0.33, 0, 0, Math.PI * 2);
   ctx.fill();
   ctx.restore();
 }
