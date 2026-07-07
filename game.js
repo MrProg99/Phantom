@@ -7,6 +7,7 @@ const mapCtx = minimap.getContext("2d");
 
 const stepsEl = document.getElementById("steps");
 const timeEl = document.getElementById("time");
+const keyStatusEl = document.getElementById("key-state");
 const stateEl = document.getElementById("state");
 const restartButton = document.getElementById("restart");
 const playAgainButton = document.getElementById("play-again");
@@ -22,6 +23,10 @@ const MONSTER_REPATH_TIME = 0.42;
 const MONSTER_WAKE_TIME = 3.2;
 const MONSTER_CATCH_DISTANCE = 0.46;
 const MONSTER_CELL_CATCH_DISTANCE = 0.82;
+const MAP_REVEAL_DURATION = 5;
+const MAP_ORB_PICKUP_DISTANCE = 0.5;
+const MAP_ORB_COUNT = 2;
+const KEY_PICKUP_DISTANCE = 0.52;
 
 const keys = new Set();
 const touchKeys = new Set();
@@ -34,6 +39,10 @@ let viewport = { width: 1, height: 1, dpr: 1 };
 let minimapSize = { width: 130, height: 130 };
 let zBuffer = [];
 let torches = [];
+let mapOrbs = [];
+let mazeKey = null;
+let hasKey = false;
+let mapRevealTimer = 0;
 let steps = 0;
 let won = false;
 let caught = false;
@@ -98,6 +107,10 @@ function resetGame() {
   player = { x: entry.x + 0.5, y: entry.y + 0.5, angle: startAngle() };
   torches = createTorches();
   monster = createMonster();
+  mazeKey = createMazeKey();
+  hasKey = false;
+  mapRevealTimer = 0;
+  mapOrbs = createMapOrbs();
   keys.clear();
   touchKeys.clear();
   steps = 0;
@@ -106,6 +119,7 @@ function resetGame() {
   heartbeatTimer = 0;
   startTime = performance.now();
   stepsEl.textContent = "0";
+  if (keyStatusEl) keyStatusEl.textContent = "Non";
   stateEl.textContent = "Entree";
   resultMessage.textContent = "Sortie atteinte";
   winBanner.classList.remove("danger-banner");
@@ -216,6 +230,100 @@ function fallbackMonsterSpawn() {
   return { x: entry.x, y: entry.y };
 }
 
+function createMazeKey() {
+  const candidates = [];
+  const fallback = [];
+
+  for (let y = 1; y < maze.length - 1; y++) {
+    for (let x = 1; x < maze[0].length - 1; x++) {
+      if (!isWalkableCell(x, y)) continue;
+      if (x === entry.x && y === entry.y) continue;
+      if (x === exit.x && y === exit.y) continue;
+      if (x === Math.floor(player.x) && y === Math.floor(player.y)) continue;
+
+      const pathFromEntry = findPath({ x: entry.x, y: entry.y }, { x, y });
+      if (!pathFromEntry.length) continue;
+
+      const cx = x + 0.5;
+      const cy = y + 0.5;
+      const distanceFromMonster = monster ? Math.hypot(cx - monster.x, cy - monster.y) : Infinity;
+      const distanceFromExit = Math.hypot(x - exit.x, y - exit.y);
+      const spawn = {
+        x,
+        y,
+        pathLength: pathFromEntry.length,
+        score: textureNoise(x + 31, y - 19, maze.length, maze[0].length)
+      };
+      fallback.push(spawn);
+
+      if (pathFromEntry.length < 7) continue;
+      if (distanceFromExit < 3) continue;
+      if (distanceFromMonster < 2.5) continue;
+      candidates.push(spawn);
+    }
+  }
+
+  const pool = candidates.length ? candidates : fallback;
+  pool.sort((a, b) => (b.pathLength - a.pathLength) || (b.score - a.score));
+  const topChoices = pool.slice(0, Math.max(1, Math.min(6, pool.length)));
+  const spawn = topChoices[Math.floor(Math.random() * topChoices.length)] || { x: entry.x + 1, y: entry.y };
+  return {
+    x: spawn.x + 0.5,
+    y: spawn.y + 0.5,
+    seed: Math.random() * Math.PI * 2
+  };
+}
+
+function createMapOrbs() {
+  const orbs = [];
+  for (let i = 0; i < MAP_ORB_COUNT; i++) {
+    orbs.push(spawnMapOrb(orbs));
+  }
+  return orbs;
+}
+
+function spawnMapOrb(existingOrbs = [], previous = null) {
+  const candidates = [];
+  const fallback = [];
+  const blockedOrbs = previous ? existingOrbs.concat(previous) : existingOrbs;
+
+  for (let y = 1; y < maze.length - 1; y++) {
+    for (let x = 1; x < maze[0].length - 1; x++) {
+      if (!isWalkableCell(x, y)) continue;
+      if (x === entry.x && y === entry.y) continue;
+      if (x === exit.x && y === exit.y) continue;
+      if (x === Math.floor(player.x) && y === Math.floor(player.y)) continue;
+      if (mazeKey && x === Math.floor(mazeKey.x) && y === Math.floor(mazeKey.y)) continue;
+      if (blockedOrbs.some((orb) => x === Math.floor(orb.x) && y === Math.floor(orb.y))) continue;
+
+      const cx = x + 0.5;
+      const cy = y + 0.5;
+      const distanceFromPlayer = Math.hypot(cx - player.x, cy - player.y);
+      const distanceFromMonster = monster ? Math.hypot(cx - monster.x, cy - monster.y) : Infinity;
+      const distanceFromPrevious = previous ? Math.hypot(cx - previous.x, cy - previous.y) : Infinity;
+      const distanceFromExisting = existingOrbs.reduce((nearest, orb) => (
+        Math.min(nearest, Math.hypot(cx - orb.x, cy - orb.y))
+      ), Infinity);
+      const spawn = { x, y };
+      fallback.push(spawn);
+
+      if (distanceFromPlayer < 3.5) continue;
+      if (distanceFromMonster < 2.5) continue;
+      if (distanceFromExisting < 3) continue;
+      if (distanceFromPrevious < 4) continue;
+      candidates.push(spawn);
+    }
+  }
+
+  const pool = candidates.length ? candidates : fallback;
+  const spawn = pool[Math.floor(Math.random() * pool.length)] || { x: entry.x + 1, y: entry.y };
+  return {
+    x: spawn.x + 0.5,
+    y: spawn.y + 0.5,
+    seed: Math.random() * Math.PI * 2
+  };
+}
+
 function resize() {
   viewport.dpr = Math.min(window.devicePixelRatio || 1, 2);
   viewport.width = window.innerWidth;
@@ -324,6 +432,34 @@ function movePlayer(dx, dy) {
   }
 }
 
+function updateMapOrb(dt) {
+  mapRevealTimer = Math.max(0, mapRevealTimer - dt);
+  if (!mapOrbs.length || won || caught) return;
+
+  for (let i = 0; i < mapOrbs.length; i++) {
+    const orb = mapOrbs[i];
+    const distance = Math.hypot(player.x - orb.x, player.y - orb.y);
+    if (distance > MAP_ORB_PICKUP_DISTANCE) continue;
+
+    mapRevealTimer = MAP_REVEAL_DURATION;
+    const otherOrbs = mapOrbs.filter((_, index) => index !== i);
+    mapOrbs[i] = spawnMapOrb(otherOrbs, orb);
+    break;
+  }
+}
+
+function updateMazeKey() {
+  if (!mazeKey || hasKey || won || caught) return;
+
+  const distance = Math.hypot(player.x - mazeKey.x, player.y - mazeKey.y);
+  if (distance > KEY_PICKUP_DISTANCE) return;
+
+  hasKey = true;
+  mazeKey = null;
+  if (keyStatusEl) keyStatusEl.textContent = "Oui";
+  stateEl.textContent = "Cle";
+}
+
 function update(dt) {
   const active = (code) => keys.has(code) || touchKeys.has(code);
   const turnSpeed = 2.45;
@@ -350,8 +486,11 @@ function update(dt) {
   player.angle = normalizeAngle(player.angle);
   updateMonster(dt);
   updateHeartbeat(dt);
+  updateMapOrb(dt);
+  updateMazeKey();
 
-  if (!won && tileAt(player.x, player.y) === TILE_EXIT) {
+  const currentTile = tileAt(player.x, player.y);
+  if (!won && currentTile === TILE_EXIT && hasKey) {
     won = true;
     resultMessage.textContent = "Sortie atteinte";
     winBanner.classList.remove("danger-banner");
@@ -360,7 +499,9 @@ function update(dt) {
   } else if (!won) {
     const distance = monsterThreatDistance();
     if (distance < 3.2) stateEl.textContent = "Danger";
-    else stateEl.textContent = tileAt(player.x, player.y) === TILE_ENTRY ? "Entree" : "Dedans";
+    else if (currentTile === TILE_EXIT && !hasKey) stateEl.textContent = "Cle requise";
+    else if (hasKey) stateEl.textContent = "Cle";
+    else stateEl.textContent = currentTile === TILE_ENTRY ? "Entree" : "Dedans";
   }
 }
 
@@ -629,6 +770,8 @@ function render(now) {
   }
 
   drawTorches(w, h, dirX, dirY, planeX, planeY, now);
+  drawMapOrb(w, h, dirX, dirY, planeX, planeY, now);
+  drawMazeKey(w, h, dirX, dirY, planeX, planeY, now);
   drawMonster(w, h, dirX, dirY, planeX, planeY, now);
   drawSprites(w, h, dirX, dirY, planeX, planeY);
   drawVignette(w, h);
@@ -795,6 +938,148 @@ function drawTorches(w, h, dirX, dirY, planeX, planeY, now) {
     drawTorchBody(screenX, bracketY, torchWidth, torchHeight, bodyAlpha);
     drawTorchFlame(screenX, flameY, torchHeight * 0.16, pulse, flameAlpha);
   }
+}
+
+function drawMapOrb(w, h, dirX, dirY, planeX, planeY, now) {
+  if (!mapOrbs.length || won) return;
+
+  const visibleOrbs = mapOrbs
+    .map((orb) => {
+      const dx = orb.x - player.x;
+      const dy = orb.y - player.y;
+      return { orb, dx, dy, distanceSq: dx * dx + dy * dy };
+    })
+    .sort((a, b) => b.distanceSq - a.distanceSq);
+
+  for (const item of visibleOrbs) {
+    const projection = projectPoint(item.dx, item.dy, dirX, dirY, planeX, planeY, w);
+    if (!projection || projection.depth <= 0.08) continue;
+
+    const screenX = projection.screenX;
+    const wallHeight = h / projection.depth;
+    const radius = clamp(wallHeight * 0.1, 7, h * 0.075);
+    if (screenX < -radius * 3 || screenX > w + radius * 3) continue;
+
+    const bufferIndex = Math.floor(clamp(screenX, 0, w - 1));
+    if (projection.depth >= (zBuffer[bufferIndex] || Infinity) + 0.06) continue;
+
+    const centerY = Math.min(h - radius * 1.35, h / 2 + wallHeight * 0.5 - radius * 1.15);
+    const pulse = 0.94 + Math.sin(now * 0.006 + item.orb.seed) * 0.08;
+    const alpha = clamp(1.22 - projection.depth * 0.055, 0.34, 1);
+
+    ctx.save();
+    ctx.globalAlpha = alpha;
+
+    ctx.fillStyle = "rgba(20, 6, 7, 0.42)";
+    ctx.beginPath();
+    ctx.ellipse(screenX, centerY + radius * 0.96, radius * 1.05, radius * 0.28, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.globalCompositeOperation = "lighter";
+    const glowRadius = radius * (3.1 + pulse * 0.35);
+    const glow = ctx.createRadialGradient(screenX, centerY, 0, screenX, centerY, glowRadius);
+    glow.addColorStop(0, "rgba(255, 90, 76, 0.5)");
+    glow.addColorStop(0.34, "rgba(214, 28, 42, 0.22)");
+    glow.addColorStop(1, "rgba(214, 28, 42, 0)");
+    ctx.fillStyle = glow;
+    ctx.fillRect(screenX - glowRadius, centerY - glowRadius, glowRadius * 2, glowRadius * 2);
+
+    ctx.globalCompositeOperation = "source-over";
+    const orb = ctx.createRadialGradient(
+      screenX - radius * 0.32,
+      centerY - radius * 0.4,
+      radius * 0.12,
+      screenX,
+      centerY,
+      radius * pulse
+    );
+    orb.addColorStop(0, "#ffe0c9");
+    orb.addColorStop(0.22, "#ff5f4b");
+    orb.addColorStop(0.72, "#b80f24");
+    orb.addColorStop(1, "#5d0715");
+    ctx.fillStyle = orb;
+    ctx.beginPath();
+    ctx.arc(screenX, centerY, radius * pulse, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = "rgba(255, 243, 219, 0.7)";
+    ctx.beginPath();
+    ctx.arc(screenX - radius * 0.34, centerY - radius * 0.42, Math.max(1.3, radius * 0.17), 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.restore();
+  }
+}
+
+function drawMazeKey(w, h, dirX, dirY, planeX, planeY, now) {
+  if (!mazeKey || hasKey || won) return;
+
+  const dx = mazeKey.x - player.x;
+  const dy = mazeKey.y - player.y;
+  const projection = projectPoint(dx, dy, dirX, dirY, planeX, planeY, w);
+  if (!projection || projection.depth <= 0.08) return;
+
+  const screenX = projection.screenX;
+  const wallHeight = h / projection.depth;
+  const size = clamp(wallHeight * 0.16, 13, h * 0.12);
+  if (screenX < -size * 3 || screenX > w + size * 3) return;
+
+  const bufferIndex = Math.floor(clamp(screenX, 0, w - 1));
+  if (projection.depth >= (zBuffer[bufferIndex] || Infinity) + 0.06) return;
+
+  const centerY = Math.min(h - size * 0.9, h / 2 + wallHeight * 0.45 - size * 0.65);
+  const bob = Math.sin(now * 0.004 + mazeKey.seed) * size * 0.06;
+  const alpha = clamp(1.16 - projection.depth * 0.055, 0.36, 1);
+  const ringRadius = size * 0.22;
+  const shaftLength = size * 0.58;
+
+  ctx.save();
+  ctx.globalAlpha = alpha;
+
+  ctx.globalCompositeOperation = "lighter";
+  const glowRadius = size * 1.45;
+  const glow = ctx.createRadialGradient(screenX, centerY + bob, 0, screenX, centerY + bob, glowRadius);
+  glow.addColorStop(0, "rgba(255, 229, 126, 0.35)");
+  glow.addColorStop(0.42, "rgba(242, 170, 43, 0.16)");
+  glow.addColorStop(1, "rgba(242, 170, 43, 0)");
+  ctx.fillStyle = glow;
+  ctx.fillRect(screenX - glowRadius, centerY + bob - glowRadius, glowRadius * 2, glowRadius * 2);
+
+  ctx.globalCompositeOperation = "source-over";
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.shadowColor = "rgba(255, 195, 64, 0.74)";
+  ctx.shadowBlur = size * 0.26;
+  ctx.strokeStyle = "#f5c24a";
+  ctx.lineWidth = Math.max(3, size * 0.12);
+
+  ctx.beginPath();
+  ctx.arc(screenX - shaftLength * 0.4, centerY + bob, ringRadius, 0, Math.PI * 2);
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.moveTo(screenX - shaftLength * 0.17, centerY + bob);
+  ctx.lineTo(screenX + shaftLength * 0.52, centerY + bob);
+  ctx.lineTo(screenX + shaftLength * 0.52, centerY + bob + size * 0.18);
+  ctx.moveTo(screenX + shaftLength * 0.26, centerY + bob);
+  ctx.lineTo(screenX + shaftLength * 0.26, centerY + bob + size * 0.15);
+  ctx.stroke();
+
+  ctx.strokeStyle = "rgba(255, 247, 191, 0.8)";
+  ctx.lineWidth = Math.max(1.4, size * 0.035);
+  ctx.beginPath();
+  ctx.arc(screenX - shaftLength * 0.4, centerY + bob - ringRadius * 0.1, ringRadius * 0.55, Math.PI * 1.16, Math.PI * 1.88);
+  ctx.moveTo(screenX - shaftLength * 0.1, centerY + bob - size * 0.06);
+  ctx.lineTo(screenX + shaftLength * 0.42, centerY + bob - size * 0.06);
+  ctx.stroke();
+
+  ctx.fillStyle = "rgba(20, 12, 4, 0.28)";
+  ctx.shadowBlur = 0;
+  ctx.beginPath();
+  ctx.ellipse(screenX, centerY + size * 0.7, size * 0.55, size * 0.13, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.restore();
 }
 
 function projectPoint(dx, dy, dirX, dirY, planeX, planeY, screenW) {
@@ -990,7 +1275,13 @@ function drawMonster(w, h, dirX, dirY, planeX, planeY, now) {
 function drawSprites(w, h, dirX, dirY, planeX, planeY) {
   const sprites = [
     { x: entry.x + 0.5, y: entry.y + 0.5, label: "ENTREE", color: "#73b8ff", core: "#d8edff" },
-    { x: exit.x + 0.5, y: exit.y + 0.5, label: "SORTIE", color: "#77e5ae", core: "#efffde" }
+    {
+      x: exit.x + 0.5,
+      y: exit.y + 0.5,
+      label: hasKey ? "SORTIE" : "VERROU",
+      color: hasKey ? "#77e5ae" : "#d9a94b",
+      core: hasKey ? "#efffde" : "#fff0a8"
+    }
   ].sort((a, b) => {
     const da = (player.x - a.x) ** 2 + (player.y - a.y) ** 2;
     const db = (player.x - b.x) ** 2 + (player.y - b.y) ** 2;
@@ -1075,8 +1366,26 @@ function drawMinimap() {
   const oy = Math.floor((h - mapH) / 2);
 
   mapCtx.clearRect(0, 0, w, h);
-  mapCtx.fillStyle = "#101820";
+  mapCtx.fillStyle = "#06090d";
   mapCtx.fillRect(0, 0, w, h);
+
+  if (mapRevealTimer <= 0) {
+    const veil = mapCtx.createRadialGradient(w / 2, h / 2, 0, w / 2, h / 2, Math.max(w, h) * 0.62);
+    veil.addColorStop(0, "rgba(37, 49, 58, 0.2)");
+    veil.addColorStop(1, "rgba(0, 0, 0, 0.35)");
+    mapCtx.fillStyle = veil;
+    mapCtx.fillRect(0, 0, w, h);
+
+    mapCtx.strokeStyle = "rgba(255, 242, 187, 0.08)";
+    mapCtx.lineWidth = 1;
+    mapCtx.beginPath();
+    mapCtx.arc(w / 2, h / 2, Math.min(w, h) * 0.27, 0, Math.PI * 2);
+    mapCtx.stroke();
+    return;
+  }
+
+  mapCtx.save();
+  mapCtx.globalAlpha = clamp(mapRevealTimer / 0.45, 0, 1);
 
   for (let y = 0; y < rows; y++) {
     for (let x = 0; x < cols; x++) {
@@ -1094,6 +1403,26 @@ function drawMinimap() {
     mapCtx.beginPath();
     mapCtx.arc(ox + torch.x * cell, oy + torch.y * cell, Math.max(1.4, cell * 0.22), 0, Math.PI * 2);
     mapCtx.fill();
+  }
+
+  for (const orb of mapOrbs) {
+    mapCtx.fillStyle = "#ff3a3f";
+    mapCtx.strokeStyle = "rgba(255, 225, 196, 0.78)";
+    mapCtx.lineWidth = Math.max(1, cell * 0.1);
+    mapCtx.beginPath();
+    mapCtx.arc(ox + orb.x * cell, oy + orb.y * cell, Math.max(2.3, cell * 0.36), 0, Math.PI * 2);
+    mapCtx.fill();
+    mapCtx.stroke();
+  }
+
+  if (mazeKey && !hasKey) {
+    mapCtx.fillStyle = "#f5c24a";
+    mapCtx.strokeStyle = "rgba(255, 247, 191, 0.86)";
+    mapCtx.lineWidth = Math.max(1, cell * 0.11);
+    mapCtx.beginPath();
+    mapCtx.arc(ox + mazeKey.x * cell, oy + mazeKey.y * cell, Math.max(2.6, cell * 0.4), 0, Math.PI * 2);
+    mapCtx.fill();
+    mapCtx.stroke();
   }
 
   if (monster && !won) {
@@ -1117,6 +1446,12 @@ function drawMinimap() {
   mapCtx.closePath();
   mapCtx.fill();
   mapCtx.restore();
+  mapCtx.restore();
+
+  if (mapRevealTimer < 0.75) {
+    mapCtx.fillStyle = `rgba(6, 9, 13, ${1 - mapRevealTimer / 0.75})`;
+    mapCtx.fillRect(0, 0, w, h);
+  }
 }
 
 function updateClock(now) {
