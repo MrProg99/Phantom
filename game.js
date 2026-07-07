@@ -7,6 +7,7 @@ const mapCtx = minimap.getContext("2d");
 
 const stepsEl = document.getElementById("steps");
 const timeEl = document.getElementById("time");
+const levelStatusEl = document.getElementById("level-state");
 const keyStatusEl = document.getElementById("key-state");
 const compassPanelEl = document.getElementById("compass-panel");
 const directionStatusEl = document.getElementById("direction-state");
@@ -33,6 +34,7 @@ const KEY_PICKUP_DISTANCE = 0.52;
 const COMPASS_PICKUP_DISTANCE = 0.52;
 const WALL_FRAME_COUNT = 7;
 const WALL_FRAME_IMAGE_SRC = "images/cadre1.jpg";
+const FINAL_LEVEL = 2;
 
 const keys = new Set();
 const touchKeys = new Set();
@@ -40,6 +42,7 @@ let maze = [];
 let entry = { x: 1, y: 1 };
 let exit = { x: 15, y: 15 };
 let player = { x: 1.5, y: 1.5, angle: 0 };
+let currentLevel = 1;
 let monster = null;
 let viewport = { width: 1, height: 1, dpr: 1 };
 let minimapSize = { width: 130, height: 130 };
@@ -116,7 +119,13 @@ function createMaze(width = 19, height = 19) {
 }
 
 function resetGame() {
-  maze = createMaze();
+  startLevel(1);
+}
+
+function startLevel(level) {
+  currentLevel = level;
+  const size = level >= 2 ? 21 : 19;
+  maze = createMaze(size, size);
   entry = { x: 1, y: 1 };
   exit = { x: maze[0].length - 2, y: maze.length - 2 };
   player = { x: entry.x + 0.5, y: entry.y + 0.5, angle: startAngle() };
@@ -137,11 +146,12 @@ function resetGame() {
   heartbeatTimer = 0;
   startTime = performance.now();
   stepsEl.textContent = "0";
+  if (levelStatusEl) levelStatusEl.textContent = String(currentLevel);
   if (keyStatusEl) keyStatusEl.textContent = "Non";
   if (directionStatusEl) directionStatusEl.textContent = "--";
   if (compassPanelEl) compassPanelEl.hidden = true;
-  stateEl.textContent = "Entree";
-  resultMessage.textContent = "Sortie atteinte";
+  stateEl.textContent = currentLevel >= 2 ? "Niveau 2" : "Entree";
+  resultMessage.textContent = currentLevel >= FINAL_LEVEL ? "Sortie finale atteinte" : "Sortie atteinte";
   winBanner.classList.remove("danger-banner");
   winBanner.hidden = true;
 }
@@ -189,7 +199,9 @@ function createTorches() {
     }
   }
 
-  const targetCount = Math.min(16, Math.max(8, Math.floor((maze.length * maze[0].length) / 24)));
+  const targetCount = currentLevel >= 2
+    ? Math.min(22, Math.max(12, Math.floor((maze.length * maze[0].length) / 20)))
+    : Math.min(16, Math.max(8, Math.floor((maze.length * maze[0].length) / 24)));
   const selected = [];
   candidates.sort((a, b) => b.score - a.score);
 
@@ -636,11 +648,7 @@ function update(dt) {
 
   const currentTile = tileAt(player.x, player.y);
   if (!won && currentTile === TILE_EXIT && hasKey) {
-    won = true;
-    resultMessage.textContent = "Sortie atteinte";
-    winBanner.classList.remove("danger-banner");
-    stateEl.textContent = "Sortie";
-    winBanner.hidden = false;
+    completeLevel();
   } else if (!won) {
     const distance = monsterThreatDistance();
     if (distance < 3.2) stateEl.textContent = "Danger";
@@ -648,6 +656,19 @@ function update(dt) {
     else if (hasKey) stateEl.textContent = "Cle";
     else stateEl.textContent = currentTile === TILE_ENTRY ? "Entree" : "Dedans";
   }
+}
+
+function completeLevel() {
+  if (currentLevel < FINAL_LEVEL) {
+    startLevel(currentLevel + 1);
+    return;
+  }
+
+  won = true;
+  resultMessage.textContent = "Sortie finale atteinte";
+  winBanner.classList.remove("danger-banner");
+  stateEl.textContent = "Sortie";
+  winBanner.hidden = false;
 }
 
 function updateMonster(dt) {
@@ -1007,14 +1028,18 @@ function render(now) {
     const rayDirY = dirY + planeY * cameraX;
     const hit = castRay(rayDirX, rayDirY);
     const distance = hit.distance;
+    const hitWorldX = player.x + distance * rayDirX;
+    const hitWorldY = player.y + distance * rayDirY;
+    const localLight = worldLightAt(hitWorldX, hitWorldY);
     const lineHeight = Math.min(h * 2, h / distance);
     const drawStart = Math.max(0, Math.floor((h - lineHeight) / 2));
     const drawEnd = Math.min(h, Math.floor((h + lineHeight) / 2));
 
-    ctx.fillStyle = wallColor(hit, distance);
+    ctx.fillStyle = wallColor(hit, distance, localLight);
     ctx.fillRect(x, drawStart, columnWidth + 1, drawEnd - drawStart);
 
-    drawWallTexture(x, drawStart, drawEnd, columnWidth, hit, distance);
+    drawWallTexture(x, drawStart, drawEnd, columnWidth, hit, distance, localLight);
+    drawColumnDarkness(x, drawStart, drawEnd, columnWidth, localLight);
 
     for (let fill = x; fill < x + columnWidth + 1 && fill < w; fill++) {
       zBuffer[fill] = distance;
@@ -1034,20 +1059,30 @@ function render(now) {
 
 function drawWorldBackground(w, h) {
   const ceiling = ctx.createLinearGradient(0, 0, 0, h * 0.52);
-  ceiling.addColorStop(0, "#1f3c52");
-  ceiling.addColorStop(1, "#708494");
+  if (isDarkLevel()) {
+    ceiling.addColorStop(0, "#03070a");
+    ceiling.addColorStop(1, "#172631");
+  } else {
+    ceiling.addColorStop(0, "#1f3c52");
+    ceiling.addColorStop(1, "#708494");
+  }
   ctx.fillStyle = ceiling;
   ctx.fillRect(0, 0, w, h / 2);
 
   const floor = ctx.createLinearGradient(0, h / 2, 0, h);
-  floor.addColorStop(0, "#796247");
-  floor.addColorStop(1, "#2d251e");
+  if (isDarkLevel()) {
+    floor.addColorStop(0, "#241a12");
+    floor.addColorStop(1, "#050403");
+  } else {
+    floor.addColorStop(0, "#796247");
+    floor.addColorStop(1, "#2d251e");
+  }
   ctx.fillStyle = floor;
   ctx.fillRect(0, h / 2, w, h / 2);
 
   ctx.save();
   ctx.lineWidth = 1;
-  ctx.strokeStyle = "rgba(255, 245, 220, 0.13)";
+  ctx.strokeStyle = isDarkLevel() ? "rgba(255, 194, 105, 0.045)" : "rgba(255, 245, 220, 0.13)";
   for (let i = -10; i <= 10; i++) {
     const x = w / 2 + i * w * 0.085;
     ctx.beginPath();
@@ -1056,7 +1091,7 @@ function drawWorldBackground(w, h) {
     ctx.stroke();
   }
 
-  ctx.strokeStyle = "rgba(20, 15, 12, 0.24)";
+  ctx.strokeStyle = isDarkLevel() ? "rgba(0, 0, 0, 0.36)" : "rgba(20, 15, 12, 0.24)";
   for (let y = h / 2 + 18; y < h; y += Math.max(9, (y - h / 2) * 0.18)) {
     ctx.beginPath();
     ctx.moveTo(0, y);
@@ -1064,7 +1099,7 @@ function drawWorldBackground(w, h) {
     ctx.stroke();
   }
 
-  ctx.strokeStyle = "rgba(230, 246, 255, 0.08)";
+  ctx.strokeStyle = isDarkLevel() ? "rgba(130, 172, 196, 0.035)" : "rgba(230, 246, 255, 0.08)";
   for (let y = 18; y < h / 2; y += 30) {
     ctx.beginPath();
     ctx.moveTo(0, y);
@@ -1074,25 +1109,28 @@ function drawWorldBackground(w, h) {
   ctx.restore();
 }
 
-function wallColor(hit, distance) {
+function wallColor(hit, distance, localLight = 1) {
   const edge = hit.wallX < 0.08 || hit.wallX > 0.92 ? 0.82 : 1;
   const side = hit.side === 1 ? 0.76 : 1;
-  const light = Math.max(0.34, 1 - distance * 0.062) * edge * side;
+  const distanceLight = Math.max(0.34, 1 - distance * 0.062);
+  const levelLight = isDarkLevel() ? 0.14 + localLight * 0.92 : 1;
+  const light = distanceLight * edge * side * levelLight;
   const r = Math.floor(166 * light);
   const g = Math.floor(136 * light);
   const b = Math.floor(97 * light);
   return `rgb(${r}, ${g}, ${b})`;
 }
 
-function drawWallTexture(x, start, end, width, hit, distance) {
+function drawWallTexture(x, start, end, width, hit, distance, localLight = 1) {
   const height = end - start;
   if (height <= 0) return;
 
-  const visibility = Math.max(0.12, 1 - distance * 0.075);
+  const lightVisibility = isDarkLevel() ? 0.28 + localLight * 0.92 : 1;
+  const visibility = Math.max(0.12, 1 - distance * 0.075) * lightVisibility;
   const rows = 7;
   const columns = 4;
   const mortar = Math.max(1, Math.min(2.2, height * 0.01));
-  const mortarAlpha = Math.max(0.1, 0.36 - distance * 0.023);
+  const mortarAlpha = Math.max(0.1, 0.36 - distance * 0.023) * lightVisibility;
 
   ctx.save();
   for (let row = 0; row < rows; row++) {
@@ -1129,7 +1167,7 @@ function drawWallTexture(x, start, end, width, hit, distance) {
     ctx.fillRect(x, y - mortar * 0.5, width + 1, mortar);
   }
 
-  const edgeAlpha = Math.max(0.08, 0.28 - distance * 0.018);
+  const edgeAlpha = Math.max(0.08, 0.28 - distance * 0.018) * lightVisibility;
   if (hit.wallX < 0.045 || hit.wallX > 0.955) {
     ctx.fillStyle = `rgba(255, 239, 190, ${edgeAlpha})`;
     ctx.fillRect(x, start, width + 1, height);
@@ -1151,6 +1189,34 @@ function positiveMod(value, divisor) {
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
+}
+
+function isDarkLevel() {
+  return currentLevel >= 2;
+}
+
+function worldLightAt(x, y) {
+  if (!isDarkLevel()) return 1;
+
+  let light = 0.08;
+  for (const torch of torches) {
+    const distance = Math.hypot(x - torch.x, y - torch.y);
+    const reach = 3.45;
+    if (distance >= reach) continue;
+
+    const strength = 1 - distance / reach;
+    light += strength * strength * 1.25;
+  }
+
+  return clamp(light, 0.08, 1);
+}
+
+function drawColumnDarkness(x, start, end, width, light) {
+  if (!isDarkLevel()) return;
+
+  const alpha = clamp(0.76 - light * 0.72, 0.04, 0.76);
+  ctx.fillStyle = `rgba(0, 0, 0, ${alpha})`;
+  ctx.fillRect(x, start, width + 1, end - start);
 }
 
 function drawWallFrames(w, h, dirX, dirY, planeX, planeY) {
@@ -1188,9 +1254,10 @@ function drawWallFrames(w, h, dirX, dirY, planeX, planeY) {
     const centerY = h / 2 - wallHeight * 0.17;
     const left = screenX - frameWidth / 2;
     const top = centerY - frameHeight / 2;
+    const levelLight = isDarkLevel() ? clamp(0.22 + worldLightAt(frame.x, frame.y) * 0.95, 0.22, 1) : 1;
     const facing = clamp(0.42 + normalView * 0.58, 0.42, 1);
-    const alpha = clamp(1.12 - projection.depth * 0.045, 0.5, 1) * facing;
-    const sideShade = clamp(0.46 + normalView * 0.54, 0.46, 1);
+    const alpha = clamp(1.12 - projection.depth * 0.045, 0.5, 1) * facing * levelLight;
+    const sideShade = clamp(0.46 + normalView * 0.54, 0.46, 1) * levelLight;
 
     drawWallFrame(left, top, frameWidth, frameHeight, alpha, sideShade);
   }
@@ -1571,10 +1638,12 @@ function projectPoint(dx, dy, dirX, dirY, planeX, planeY, screenW) {
 function drawTorchHalo(x, y, height, pulse, alpha) {
   ctx.save();
   ctx.globalCompositeOperation = "lighter";
-  const radius = height * (0.62 + pulse * 0.08);
+  const darkBoost = isDarkLevel() ? 1.58 : 1;
+  const alphaBoost = isDarkLevel() ? 1.45 : 1;
+  const radius = height * (0.62 + pulse * 0.08) * darkBoost;
   const glow = ctx.createRadialGradient(x, y, 0, x, y, radius);
-  glow.addColorStop(0, `rgba(255, 219, 128, ${0.22 * alpha})`);
-  glow.addColorStop(0.22, `rgba(255, 135, 54, ${0.13 * alpha})`);
+  glow.addColorStop(0, `rgba(255, 219, 128, ${0.22 * alpha * alphaBoost})`);
+  glow.addColorStop(0.22, `rgba(255, 135, 54, ${0.13 * alpha * alphaBoost})`);
   glow.addColorStop(1, "rgba(255, 95, 31, 0)");
   ctx.fillStyle = glow;
   ctx.fillRect(x - radius, y - radius, radius * 2, radius * 2);
@@ -1824,7 +1893,7 @@ function withAlpha(hex, alpha) {
 function drawVignette(w, h) {
   const gradient = ctx.createRadialGradient(w / 2, h / 2, h * 0.22, w / 2, h / 2, h * 0.78);
   gradient.addColorStop(0, "rgba(0, 0, 0, 0)");
-  gradient.addColorStop(1, "rgba(0, 0, 0, 0.36)");
+  gradient.addColorStop(1, isDarkLevel() ? "rgba(0, 0, 0, 0.58)" : "rgba(0, 0, 0, 0.36)");
   ctx.fillStyle = gradient;
   ctx.fillRect(0, 0, w, h);
 }
@@ -1940,7 +2009,7 @@ function drawMinimap() {
 }
 
 function updateClock(now) {
-  const elapsed = Math.floor((now - startTime) / 1000);
+  const elapsed = Math.max(0, Math.floor((now - startTime) / 1000));
   const minutes = String(Math.floor(elapsed / 60)).padStart(2, "0");
   const seconds = String(elapsed % 60).padStart(2, "0");
   timeEl.textContent = `${minutes}:${seconds}`;
