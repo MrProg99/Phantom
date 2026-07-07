@@ -25,11 +25,14 @@ const MONSTER_REPATH_TIME = 0.42;
 const MONSTER_WAKE_TIME = 3.2;
 const MONSTER_CATCH_DISTANCE = 0.46;
 const MONSTER_CELL_CATCH_DISTANCE = 0.82;
+const MONSTER_CATCH_VIEW_DISTANCE = 0.44;
 const MAP_REVEAL_DURATION = 5;
 const MAP_ORB_PICKUP_DISTANCE = 0.5;
 const MAP_ORB_COUNT = 2;
 const KEY_PICKUP_DISTANCE = 0.52;
 const COMPASS_PICKUP_DISTANCE = 0.52;
+const WALL_FRAME_COUNT = 7;
+const WALL_FRAME_IMAGE_SRC = "images/cadre1.jpg";
 
 const keys = new Set();
 const touchKeys = new Set();
@@ -42,6 +45,7 @@ let viewport = { width: 1, height: 1, dpr: 1 };
 let minimapSize = { width: 130, height: 130 };
 let zBuffer = [];
 let torches = [];
+let wallFrames = [];
 let mapOrbs = [];
 let mazeKey = null;
 let mazeCompass = null;
@@ -57,6 +61,12 @@ let audioContext = null;
 let audioReady = false;
 let heartbeatPreviewed = false;
 let heartbeatTimer = 0;
+let wallFrameImageReady = false;
+const wallFrameImage = new Image();
+wallFrameImage.onload = () => {
+  wallFrameImageReady = true;
+};
+wallFrameImage.src = WALL_FRAME_IMAGE_SRC;
 
 function createMaze(width = 19, height = 19) {
   const grid = Array.from({ length: height }, () => Array(width).fill(TILE_WALL));
@@ -111,6 +121,7 @@ function resetGame() {
   exit = { x: maze[0].length - 2, y: maze.length - 2 };
   player = { x: entry.x + 0.5, y: entry.y + 0.5, angle: startAngle() };
   torches = createTorches();
+  wallFrames = createWallFrames();
   monster = createMonster();
   mazeKey = createMazeKey();
   mazeCompass = createMazeCompass();
@@ -185,6 +196,57 @@ function createTorches() {
   for (const candidate of candidates) {
     if (selected.length >= targetCount) break;
     const hasSpace = selected.every((torch) => Math.hypot(torch.x - candidate.x, torch.y - candidate.y) > 2.6);
+    if (hasSpace) selected.push(candidate);
+  }
+
+  return selected;
+}
+
+function createWallFrames() {
+  const candidates = [];
+  const faces = [
+    { id: 1, dx: 0, dy: -1, offsetX: 0.5, offsetY: 0.075, nx: 0, ny: 1 },
+    { id: 2, dx: 0, dy: 1, offsetX: 0.5, offsetY: 0.925, nx: 0, ny: -1 },
+    { id: 3, dx: -1, dy: 0, offsetX: 0.075, offsetY: 0.5, nx: 1, ny: 0 },
+    { id: 4, dx: 1, dy: 0, offsetX: 0.925, offsetY: 0.5, nx: -1, ny: 0 }
+  ];
+
+  for (let y = 1; y < maze.length - 1; y++) {
+    for (let x = 1; x < maze[0].length - 1; x++) {
+      const tile = maze[y][x];
+      const nearEntry = Math.abs(x - entry.x) + Math.abs(y - entry.y) < 4;
+      const nearExit = Math.abs(x - exit.x) + Math.abs(y - exit.y) < 4;
+      if (tile === TILE_WALL || tile === TILE_ENTRY || tile === TILE_EXIT || nearEntry || nearExit) continue;
+
+      for (const face of faces) {
+        if (maze[y + face.dy]?.[x + face.dx] !== TILE_WALL) continue;
+
+        const frameX = x + face.offsetX;
+        const frameY = y + face.offsetY;
+        const tooCloseToTorch = torches.some((torch) => Math.hypot(torch.x - frameX, torch.y - frameY) < 1.15);
+        if (tooCloseToTorch) continue;
+
+        candidates.push({
+          x: frameX,
+          y: frameY,
+          cellX: x,
+          cellY: y,
+          nx: face.nx,
+          ny: face.ny,
+          seed: textureNoise(x - 9, y + 23, face.id, maze.length),
+          score: textureNoise(x + 43, y - 31, face.id, maze[0].length)
+        });
+      }
+    }
+  }
+
+  const targetCount = Math.min(WALL_FRAME_COUNT, Math.max(3, Math.floor((maze.length * maze[0].length) / 54)));
+  const selected = [];
+  candidates.sort((a, b) => b.score - a.score);
+
+  for (const candidate of candidates) {
+    if (selected.length >= targetCount) break;
+    const hasSpace = selected.every((frame) => Math.hypot(frame.x - candidate.x, frame.y - candidate.y) > 3.2);
     if (hasSpace) selected.push(candidate);
   }
 
@@ -672,7 +734,26 @@ function monsterThreatDistance() {
   return firstStep + Math.max(0, monster.path.length - 1);
 }
 
+function faceMonsterOnCatch() {
+  if (!monster) return;
+
+  const dx = monster.x - player.x;
+  const dy = monster.y - player.y;
+  const distance = Math.hypot(dx, dy);
+  const angle = distance > 0.001 ? Math.atan2(dy, dx) : player.angle;
+  player.angle = normalizeAngle(angle);
+
+  if (distance < MONSTER_CATCH_VIEW_DISTANCE) {
+    monster.x = player.x + Math.cos(player.angle) * MONSTER_CATCH_VIEW_DISTANCE;
+    monster.y = player.y + Math.sin(player.angle) * MONSTER_CATCH_VIEW_DISTANCE;
+  }
+
+  updateCompassDisplay();
+}
+
 function catchPlayer() {
+  faceMonsterOnCatch();
+  playCaptureSound();
   caught = true;
   keys.clear();
   touchKeys.clear();
@@ -751,6 +832,94 @@ function playHeartPulse(start, closeness, secondBeat) {
   gain.connect(audioContext.destination);
   oscillator.start(start);
   oscillator.stop(start + 0.26);
+}
+
+function playCaptureSound() {
+  if (!audioContext || !audioReady) return;
+  if (audioContext.state === "suspended") return;
+
+  const now = audioContext.currentTime;
+  playCaptureThump(now);
+  playCaptureSnarl(now + 0.018);
+  playCaptureNoise(now + 0.012);
+}
+
+function playCaptureThump(start) {
+  const oscillator = audioContext.createOscillator();
+  const filter = audioContext.createBiquadFilter();
+  const gain = audioContext.createGain();
+
+  oscillator.type = "sawtooth";
+  oscillator.frequency.setValueAtTime(118, start);
+  oscillator.frequency.exponentialRampToValueAtTime(34, start + 0.32);
+
+  filter.type = "lowpass";
+  filter.frequency.setValueAtTime(420, start);
+  filter.frequency.exponentialRampToValueAtTime(95, start + 0.3);
+
+  gain.gain.setValueAtTime(0.0001, start);
+  gain.gain.exponentialRampToValueAtTime(0.78, start + 0.012);
+  gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.36);
+
+  oscillator.connect(filter);
+  filter.connect(gain);
+  gain.connect(audioContext.destination);
+  oscillator.start(start);
+  oscillator.stop(start + 0.38);
+}
+
+function playCaptureSnarl(start) {
+  const oscillator = audioContext.createOscillator();
+  const filter = audioContext.createBiquadFilter();
+  const gain = audioContext.createGain();
+
+  oscillator.type = "square";
+  oscillator.frequency.setValueAtTime(690, start);
+  oscillator.frequency.exponentialRampToValueAtTime(112, start + 0.2);
+
+  filter.type = "bandpass";
+  filter.frequency.setValueAtTime(360, start);
+  filter.Q.setValueAtTime(5.5, start);
+
+  gain.gain.setValueAtTime(0.0001, start);
+  gain.gain.exponentialRampToValueAtTime(0.18, start + 0.01);
+  gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.22);
+
+  oscillator.connect(filter);
+  filter.connect(gain);
+  gain.connect(audioContext.destination);
+  oscillator.start(start);
+  oscillator.stop(start + 0.24);
+}
+
+function playCaptureNoise(start) {
+  const duration = 0.18;
+  const sampleRate = audioContext.sampleRate;
+  const buffer = audioContext.createBuffer(1, Math.floor(sampleRate * duration), sampleRate);
+  const data = buffer.getChannelData(0);
+
+  for (let i = 0; i < data.length; i++) {
+    const fade = 1 - i / data.length;
+    data[i] = (Math.random() * 2 - 1) * fade * fade;
+  }
+
+  const source = audioContext.createBufferSource();
+  const filter = audioContext.createBiquadFilter();
+  const gain = audioContext.createGain();
+
+  source.buffer = buffer;
+  filter.type = "highpass";
+  filter.frequency.setValueAtTime(560, start);
+
+  gain.gain.setValueAtTime(0.0001, start);
+  gain.gain.exponentialRampToValueAtTime(0.22, start + 0.008);
+  gain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+
+  source.connect(filter);
+  filter.connect(gain);
+  gain.connect(audioContext.destination);
+  source.start(start);
+  source.stop(start + duration);
 }
 
 function normalizeAngle(angle) {
@@ -852,6 +1021,7 @@ function render(now) {
     }
   }
 
+  drawWallFrames(w, h, dirX, dirY, planeX, planeY);
   drawTorches(w, h, dirX, dirY, planeX, planeY, now);
   drawMapOrb(w, h, dirX, dirY, planeX, planeY, now);
   drawMazeKey(w, h, dirX, dirY, planeX, planeY, now);
@@ -981,6 +1151,137 @@ function positiveMod(value, divisor) {
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
+}
+
+function drawWallFrames(w, h, dirX, dirY, planeX, planeY) {
+  if (!wallFrames.length) return;
+
+  const visibleFrames = wallFrames
+    .map((frame) => {
+      const dx = frame.x - player.x;
+      const dy = frame.y - player.y;
+      return { frame, dx, dy, distanceSq: dx * dx + dy * dy };
+    })
+    .sort((a, b) => b.distanceSq - a.distanceSq);
+
+  for (const item of visibleFrames) {
+    const frame = item.frame;
+    const distance = Math.sqrt(item.distanceSq);
+    const normalView = ((player.x - frame.x) * frame.nx + (player.y - frame.y) * frame.ny) / Math.max(0.001, distance);
+    if (normalView < -0.08) continue;
+
+    const projection = projectPoint(item.dx, item.dy, dirX, dirY, planeX, planeY, w);
+    if (!projection || projection.depth <= 0.08) continue;
+
+    const screenX = projection.screenX;
+    const bufferIndex = Math.floor(clamp(screenX, 0, w - 1));
+    if (screenX < -120 || screenX > w + 120) continue;
+    if (projection.depth >= (zBuffer[bufferIndex] || Infinity) + 0.1) continue;
+
+    const wallHeight = h / projection.depth;
+    const imageRatio = wallFrameImageReady && wallFrameImage.naturalHeight
+      ? clamp(wallFrameImage.naturalWidth / wallFrameImage.naturalHeight, 0.55, 1.35)
+      : 0.78;
+    const frameHeight = clamp(wallHeight * 0.34, 22, h * 0.38);
+    const angleScale = clamp(0.18 + normalView * 0.82, 0.18, 1);
+    const frameWidth = frameHeight * imageRatio * angleScale;
+    const centerY = h / 2 - wallHeight * 0.17;
+    const left = screenX - frameWidth / 2;
+    const top = centerY - frameHeight / 2;
+    const facing = clamp(0.42 + normalView * 0.58, 0.42, 1);
+    const alpha = clamp(1.12 - projection.depth * 0.045, 0.5, 1) * facing;
+    const sideShade = clamp(0.46 + normalView * 0.54, 0.46, 1);
+
+    drawWallFrame(left, top, frameWidth, frameHeight, alpha, sideShade);
+  }
+}
+
+function drawWallFrame(x, y, width, height, alpha, sideShade = 1) {
+  const border = Math.max(2, Math.min(10, Math.min(width, height) * 0.1));
+  const innerX = x + border;
+  const innerY = y + border;
+  const innerW = Math.max(1, width - border * 2);
+  const innerH = Math.max(1, height - border * 2);
+
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = "rgba(8, 5, 3, 0.34)";
+  ctx.fillRect(x + border * 0.55, y + border * 0.72, width, height);
+
+  const frameGradient = ctx.createLinearGradient(x, y, x + width, y + height);
+  frameGradient.addColorStop(0, "#2d1809");
+  frameGradient.addColorStop(0.38, "#9a6129");
+  frameGradient.addColorStop(0.64, "#d19646");
+  frameGradient.addColorStop(1, "#3a210c");
+  ctx.fillStyle = frameGradient;
+  ctx.fillRect(x, y, width, height);
+
+  ctx.fillStyle = "#1b1008";
+  ctx.fillRect(innerX - border * 0.22, innerY - border * 0.22, innerW + border * 0.44, innerH + border * 0.44);
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(innerX, innerY, innerW, innerH);
+  ctx.clip();
+
+  if (wallFrameImageReady) {
+    drawCoverImage(wallFrameImage, innerX, innerY, innerW, innerH);
+  } else {
+    ctx.fillStyle = "#20150f";
+    ctx.fillRect(innerX, innerY, innerW, innerH);
+    ctx.strokeStyle = "rgba(255, 231, 174, 0.2)";
+    ctx.lineWidth = Math.max(1, border * 0.28);
+    ctx.beginPath();
+    ctx.moveTo(innerX, innerY + innerH);
+    ctx.lineTo(innerX + innerW, innerY);
+    ctx.stroke();
+  }
+
+  const shine = ctx.createLinearGradient(innerX, innerY, innerX + innerW, innerY + innerH);
+  shine.addColorStop(0, "rgba(255, 255, 255, 0.16)");
+  shine.addColorStop(0.34, "rgba(255, 255, 255, 0)");
+  shine.addColorStop(1, "rgba(0, 0, 0, 0.2)");
+  ctx.fillStyle = shine;
+  ctx.fillRect(innerX, innerY, innerW, innerH);
+
+  if (sideShade < 0.98) {
+    ctx.fillStyle = `rgba(0, 0, 0, ${(1 - sideShade) * 0.48})`;
+    ctx.fillRect(innerX, innerY, innerW, innerH);
+  }
+  ctx.restore();
+
+  ctx.strokeStyle = "rgba(255, 226, 151, 0.42)";
+  ctx.lineWidth = Math.max(1, border * 0.22);
+  ctx.strokeRect(x + border * 0.32, y + border * 0.32, width - border * 0.64, height - border * 0.64);
+
+  ctx.strokeStyle = "rgba(12, 7, 3, 0.72)";
+  ctx.lineWidth = Math.max(1, border * 0.34);
+  ctx.strokeRect(innerX, innerY, innerW, innerH);
+
+  if (sideShade < 0.98) {
+    ctx.fillStyle = `rgba(0, 0, 0, ${(1 - sideShade) * 0.18})`;
+    ctx.fillRect(x, y, width, height);
+  }
+  ctx.restore();
+}
+
+function drawCoverImage(image, x, y, width, height) {
+  const sourceRatio = image.naturalWidth / image.naturalHeight;
+  const targetRatio = width / height;
+  let sx = 0;
+  let sy = 0;
+  let sw = image.naturalWidth;
+  let sh = image.naturalHeight;
+
+  if (sourceRatio > targetRatio) {
+    sw = image.naturalHeight * targetRatio;
+    sx = (image.naturalWidth - sw) / 2;
+  } else {
+    sh = image.naturalWidth / targetRatio;
+    sy = (image.naturalHeight - sh) / 2;
+  }
+
+  ctx.drawImage(image, sx, sy, sw, sh, x, y, width, height);
 }
 
 function drawTorches(w, h, dirX, dirY, planeX, planeY, now) {
@@ -1383,7 +1684,7 @@ function drawMonster(w, h, dirX, dirY, planeX, planeY, now) {
 
   const screenX = projection.screenX;
   if (screenX < -120 || screenX > w + 120) return;
-  if (projection.depth >= (zBuffer[Math.max(0, Math.min(w - 1, screenX))] || Infinity) + 0.08) return;
+  if (!caught && projection.depth >= (zBuffer[Math.max(0, Math.min(w - 1, screenX))] || Infinity) + 0.08) return;
 
   const spriteHeight = Math.max(30, Math.min(h * 0.84, h / projection.depth * 0.62));
   const spriteWidth = spriteHeight * 0.42;
