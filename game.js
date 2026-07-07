@@ -8,6 +8,8 @@ const mapCtx = minimap.getContext("2d");
 const stepsEl = document.getElementById("steps");
 const timeEl = document.getElementById("time");
 const keyStatusEl = document.getElementById("key-state");
+const compassPanelEl = document.getElementById("compass-panel");
+const directionStatusEl = document.getElementById("direction-state");
 const stateEl = document.getElementById("state");
 const restartButton = document.getElementById("restart");
 const playAgainButton = document.getElementById("play-again");
@@ -27,6 +29,7 @@ const MAP_REVEAL_DURATION = 5;
 const MAP_ORB_PICKUP_DISTANCE = 0.5;
 const MAP_ORB_COUNT = 2;
 const KEY_PICKUP_DISTANCE = 0.52;
+const COMPASS_PICKUP_DISTANCE = 0.52;
 
 const keys = new Set();
 const touchKeys = new Set();
@@ -41,7 +44,9 @@ let zBuffer = [];
 let torches = [];
 let mapOrbs = [];
 let mazeKey = null;
+let mazeCompass = null;
 let hasKey = false;
+let hasCompass = false;
 let mapRevealTimer = 0;
 let steps = 0;
 let won = false;
@@ -108,7 +113,9 @@ function resetGame() {
   torches = createTorches();
   monster = createMonster();
   mazeKey = createMazeKey();
+  mazeCompass = createMazeCompass();
   hasKey = false;
+  hasCompass = false;
   mapRevealTimer = 0;
   mapOrbs = createMapOrbs();
   keys.clear();
@@ -120,6 +127,8 @@ function resetGame() {
   startTime = performance.now();
   stepsEl.textContent = "0";
   if (keyStatusEl) keyStatusEl.textContent = "Non";
+  if (directionStatusEl) directionStatusEl.textContent = "--";
+  if (compassPanelEl) compassPanelEl.hidden = true;
   stateEl.textContent = "Entree";
   resultMessage.textContent = "Sortie atteinte";
   winBanner.classList.remove("danger-banner");
@@ -274,6 +283,51 @@ function createMazeKey() {
   };
 }
 
+function createMazeCompass() {
+  const candidates = [];
+  const fallback = [];
+
+  for (let y = 1; y < maze.length - 1; y++) {
+    for (let x = 1; x < maze[0].length - 1; x++) {
+      if (!isWalkableCell(x, y)) continue;
+      if (x === entry.x && y === entry.y) continue;
+      if (x === exit.x && y === exit.y) continue;
+      if (x === Math.floor(player.x) && y === Math.floor(player.y)) continue;
+      if (mazeKey && x === Math.floor(mazeKey.x) && y === Math.floor(mazeKey.y)) continue;
+
+      const pathFromEntry = findPath({ x: entry.x, y: entry.y }, { x, y });
+      if (!pathFromEntry.length) continue;
+
+      const cx = x + 0.5;
+      const cy = y + 0.5;
+      const distanceFromKey = mazeKey ? Math.hypot(cx - mazeKey.x, cy - mazeKey.y) : Infinity;
+      const distanceFromMonster = monster ? Math.hypot(cx - monster.x, cy - monster.y) : Infinity;
+      const spawn = {
+        x,
+        y,
+        pathLength: pathFromEntry.length,
+        score: textureNoise(x - 23, y + 41, maze[0].length, maze.length)
+      };
+      fallback.push(spawn);
+
+      if (pathFromEntry.length < 5) continue;
+      if (distanceFromKey < 3) continue;
+      if (distanceFromMonster < 2.5) continue;
+      candidates.push(spawn);
+    }
+  }
+
+  const pool = candidates.length ? candidates : fallback;
+  pool.sort((a, b) => (b.score - a.score) || (b.pathLength - a.pathLength));
+  const topChoices = pool.slice(0, Math.max(1, Math.min(8, pool.length)));
+  const spawn = topChoices[Math.floor(Math.random() * topChoices.length)] || { x: entry.x + 1, y: entry.y };
+  return {
+    x: spawn.x + 0.5,
+    y: spawn.y + 0.5,
+    seed: Math.random() * Math.PI * 2
+  };
+}
+
 function createMapOrbs() {
   const orbs = [];
   for (let i = 0; i < MAP_ORB_COUNT; i++) {
@@ -294,6 +348,7 @@ function spawnMapOrb(existingOrbs = [], previous = null) {
       if (x === exit.x && y === exit.y) continue;
       if (x === Math.floor(player.x) && y === Math.floor(player.y)) continue;
       if (mazeKey && x === Math.floor(mazeKey.x) && y === Math.floor(mazeKey.y)) continue;
+      if (mazeCompass && x === Math.floor(mazeCompass.x) && y === Math.floor(mazeCompass.y)) continue;
       if (blockedOrbs.some((orb) => x === Math.floor(orb.x) && y === Math.floor(orb.y))) continue;
 
       const cx = x + 0.5;
@@ -460,6 +515,32 @@ function updateMazeKey() {
   stateEl.textContent = "Cle";
 }
 
+function updateMazeCompass() {
+  if (!mazeCompass || hasCompass || won || caught) return;
+
+  const distance = Math.hypot(player.x - mazeCompass.x, player.y - mazeCompass.y);
+  if (distance > COMPASS_PICKUP_DISTANCE) return;
+
+  hasCompass = true;
+  mazeCompass = null;
+  if (compassPanelEl) compassPanelEl.hidden = false;
+  updateCompassDisplay();
+  stateEl.textContent = "Boussole";
+}
+
+function updateCompassDisplay() {
+  if (!hasCompass || !directionStatusEl) return;
+  directionStatusEl.textContent = cardinalDirection(player.angle);
+}
+
+function cardinalDirection(angle) {
+  const normalized = normalizeAngle(angle);
+  if (normalized < Math.PI * 0.25 || normalized >= Math.PI * 1.75) return "Est";
+  if (normalized < Math.PI * 0.75) return "Sud";
+  if (normalized < Math.PI * 1.25) return "Ouest";
+  return "Nord";
+}
+
 function update(dt) {
   const active = (code) => keys.has(code) || touchKeys.has(code);
   const turnSpeed = 2.45;
@@ -488,6 +569,8 @@ function update(dt) {
   updateHeartbeat(dt);
   updateMapOrb(dt);
   updateMazeKey();
+  updateMazeCompass();
+  updateCompassDisplay();
 
   const currentTile = tileAt(player.x, player.y);
   if (!won && currentTile === TILE_EXIT && hasKey) {
@@ -772,6 +855,7 @@ function render(now) {
   drawTorches(w, h, dirX, dirY, planeX, planeY, now);
   drawMapOrb(w, h, dirX, dirY, planeX, planeY, now);
   drawMazeKey(w, h, dirX, dirY, planeX, planeY, now);
+  drawMazeCompass(w, h, dirX, dirY, planeX, planeY, now);
   drawMonster(w, h, dirX, dirY, planeX, planeY, now);
   drawSprites(w, h, dirX, dirY, planeX, planeY);
   drawVignette(w, h);
@@ -1077,6 +1161,96 @@ function drawMazeKey(w, h, dirX, dirY, planeX, planeY, now) {
   ctx.shadowBlur = 0;
   ctx.beginPath();
   ctx.ellipse(screenX, centerY + size * 0.7, size * 0.55, size * 0.13, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.restore();
+}
+
+function drawMazeCompass(w, h, dirX, dirY, planeX, planeY, now) {
+  if (!mazeCompass || hasCompass || won) return;
+
+  const dx = mazeCompass.x - player.x;
+  const dy = mazeCompass.y - player.y;
+  const projection = projectPoint(dx, dy, dirX, dirY, planeX, planeY, w);
+  if (!projection || projection.depth <= 0.08) return;
+
+  const screenX = projection.screenX;
+  const wallHeight = h / projection.depth;
+  const radius = clamp(wallHeight * 0.095, 10, h * 0.085);
+  if (screenX < -radius * 3 || screenX > w + radius * 3) return;
+
+  const bufferIndex = Math.floor(clamp(screenX, 0, w - 1));
+  if (projection.depth >= (zBuffer[bufferIndex] || Infinity) + 0.06) return;
+
+  const centerY = Math.min(h - radius * 1.15, h / 2 + wallHeight * 0.48 - radius * 0.72);
+  const bob = Math.sin(now * 0.0045 + mazeCompass.seed) * radius * 0.08;
+  const alpha = clamp(1.18 - projection.depth * 0.055, 0.36, 1);
+  const y = centerY + bob;
+
+  ctx.save();
+  ctx.globalAlpha = alpha;
+
+  ctx.globalCompositeOperation = "lighter";
+  const glowRadius = radius * 2.15;
+  const glow = ctx.createRadialGradient(screenX, y, 0, screenX, y, glowRadius);
+  glow.addColorStop(0, "rgba(126, 224, 195, 0.34)");
+  glow.addColorStop(0.42, "rgba(245, 194, 74, 0.15)");
+  glow.addColorStop(1, "rgba(126, 224, 195, 0)");
+  ctx.fillStyle = glow;
+  ctx.fillRect(screenX - glowRadius, y - glowRadius, glowRadius * 2, glowRadius * 2);
+
+  ctx.globalCompositeOperation = "source-over";
+  ctx.shadowColor = "rgba(255, 211, 95, 0.72)";
+  ctx.shadowBlur = radius * 0.35;
+
+  const body = ctx.createRadialGradient(screenX - radius * 0.3, y - radius * 0.35, radius * 0.1, screenX, y, radius);
+  body.addColorStop(0, "#fff3b6");
+  body.addColorStop(0.38, "#d99b35");
+  body.addColorStop(1, "#5b3711");
+  ctx.fillStyle = body;
+  ctx.beginPath();
+  ctx.arc(screenX, y, radius, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.strokeStyle = "#2a1a0b";
+  ctx.lineWidth = Math.max(2, radius * 0.16);
+  ctx.beginPath();
+  ctx.arc(screenX, y, radius * 0.82, 0, Math.PI * 2);
+  ctx.stroke();
+
+  ctx.fillStyle = "#101820";
+  ctx.beginPath();
+  ctx.arc(screenX, y, radius * 0.58, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.shadowBlur = radius * 0.18;
+  ctx.fillStyle = "#e74d43";
+  ctx.beginPath();
+  ctx.moveTo(screenX, y - radius * 0.48);
+  ctx.lineTo(screenX + radius * 0.12, y + radius * 0.08);
+  ctx.lineTo(screenX, y + radius * 0.16);
+  ctx.lineTo(screenX - radius * 0.12, y + radius * 0.08);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.fillStyle = "#7be0c3";
+  ctx.beginPath();
+  ctx.moveTo(screenX, y + radius * 0.48);
+  ctx.lineTo(screenX + radius * 0.1, y - radius * 0.06);
+  ctx.lineTo(screenX, y - radius * 0.14);
+  ctx.lineTo(screenX - radius * 0.1, y - radius * 0.06);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.fillStyle = "#fff1ba";
+  ctx.beginPath();
+  ctx.arc(screenX, y, Math.max(1.5, radius * 0.12), 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = "rgba(20, 12, 4, 0.3)";
+  ctx.beginPath();
+  ctx.ellipse(screenX, centerY + radius * 1.05, radius * 0.82, radius * 0.16, 0, 0, Math.PI * 2);
   ctx.fill();
 
   ctx.restore();
@@ -1421,6 +1595,16 @@ function drawMinimap() {
     mapCtx.lineWidth = Math.max(1, cell * 0.11);
     mapCtx.beginPath();
     mapCtx.arc(ox + mazeKey.x * cell, oy + mazeKey.y * cell, Math.max(2.6, cell * 0.4), 0, Math.PI * 2);
+    mapCtx.fill();
+    mapCtx.stroke();
+  }
+
+  if (mazeCompass && !hasCompass) {
+    mapCtx.fillStyle = "#7be0c3";
+    mapCtx.strokeStyle = "rgba(255, 247, 191, 0.86)";
+    mapCtx.lineWidth = Math.max(1, cell * 0.1);
+    mapCtx.beginPath();
+    mapCtx.arc(ox + mazeCompass.x * cell, oy + mazeCompass.y * cell, Math.max(2.4, cell * 0.38), 0, Math.PI * 2);
     mapCtx.fill();
     mapCtx.stroke();
   }
