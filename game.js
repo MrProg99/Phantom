@@ -4,6 +4,8 @@ const view = document.getElementById("view");
 const ctx = view.getContext("2d");
 const minimap = document.getElementById("minimap");
 const mapCtx = minimap.getContext("2d");
+const ceilingBuffer = document.createElement("canvas");
+const ceilingBufferCtx = ceilingBuffer.getContext("2d");
 
 const stepsEl = document.getElementById("steps");
 const timeEl = document.getElementById("time");
@@ -22,16 +24,20 @@ const TILE_OPEN = " ";
 const TILE_WALL = "#";
 const TILE_ENTRY = "E";
 const TILE_EXIT = "X";
+const TILE_TELEPORTER = "T";
 const MONSTER_REPATH_TIME = 0.42;
 const MONSTER_WAKE_TIME = 3.2;
 const MONSTER_CATCH_DISTANCE = 0.46;
 const MONSTER_CELL_CATCH_DISTANCE = 0.82;
 const MONSTER_CATCH_VIEW_DISTANCE = 0.44;
+const TELEPORT_COOLDOWN = 0.72;
 const MAP_REVEAL_DURATION = 5;
 const MAP_ORB_PICKUP_DISTANCE = 0.5;
 const MAP_ORB_COUNT = 2;
 const KEY_PICKUP_DISTANCE = 0.52;
 const COMPASS_PICKUP_DISTANCE = 0.52;
+const PLAYER_COLLISION_RADIUS = 0.19;
+const MIN_WALL_RENDER_DISTANCE = 0.58;
 const WALL_FRAME_COUNT = 7;
 const WALL_FRAME_IMAGE_SRC = "images/cadre1.jpg";
 const FINAL_LEVEL = 2;
@@ -49,6 +55,7 @@ let minimapSize = { width: 130, height: 130 };
 let zBuffer = [];
 let torches = [];
 let wallFrames = [];
+let teleporters = [];
 let mapOrbs = [];
 let mazeKey = null;
 let mazeCompass = null;
@@ -64,6 +71,7 @@ let audioContext = null;
 let audioReady = false;
 let heartbeatPreviewed = false;
 let heartbeatTimer = 0;
+let teleportCooldown = 0;
 let wallFrameImageReady = false;
 const wallFrameImage = new Image();
 wallFrameImage.onload = () => {
@@ -129,6 +137,7 @@ function startLevel(level) {
   entry = { x: 1, y: 1 };
   exit = { x: maze[0].length - 2, y: maze.length - 2 };
   player = { x: entry.x + 0.5, y: entry.y + 0.5, angle: startAngle() };
+  teleporters = createTeleporters();
   torches = createTorches();
   wallFrames = createWallFrames();
   monster = createMonster();
@@ -144,6 +153,7 @@ function startLevel(level) {
   won = false;
   caught = false;
   heartbeatTimer = 0;
+  teleportCooldown = 0;
   startTime = performance.now();
   stepsEl.textContent = "0";
   if (levelStatusEl) levelStatusEl.textContent = String(currentLevel);
@@ -167,6 +177,74 @@ function startAngle() {
   return open ? open.angle : 0;
 }
 
+function createTeleporters() {
+  const candidates = [];
+  const usedWalls = new Set();
+  const faces = [
+    { id: 1, dx: 0, dy: -1, nx: 0, ny: 1 },
+    { id: 2, dx: 0, dy: 1, nx: 0, ny: -1 },
+    { id: 3, dx: -1, dy: 0, nx: 1, ny: 0 },
+    { id: 4, dx: 1, dy: 0, nx: -1, ny: 0 }
+  ];
+
+  for (let y = 1; y < maze.length - 1; y++) {
+    for (let x = 1; x < maze[0].length - 1; x++) {
+      if (!isWalkableCell(x, y)) continue;
+      if (x === entry.x && y === entry.y) continue;
+      if (x === exit.x && y === exit.y) continue;
+      if (Math.abs(x - entry.x) + Math.abs(y - entry.y) < 5) continue;
+      if (Math.abs(x - exit.x) + Math.abs(y - exit.y) < 4) continue;
+
+      for (const face of faces) {
+        const wallX = x + face.dx;
+        const wallY = y + face.dy;
+        if (wallX <= 0 || wallY <= 0 || wallX >= maze[0].length - 1 || wallY >= maze.length - 1) continue;
+        if (maze[wallY]?.[wallX] !== TILE_WALL) continue;
+
+        const wallKey = cellKey(wallX, wallY);
+        if (usedWalls.has(wallKey)) continue;
+        usedWalls.add(wallKey);
+
+        const pathFromEntry = findPath({ x: entry.x, y: entry.y }, { x, y });
+        if (pathFromEntry.length < 5) continue;
+
+        candidates.push({
+          wallX,
+          wallY,
+          cellX: x,
+          cellY: y,
+          nx: face.nx,
+          ny: face.ny,
+          score: textureNoise(wallX + 19, wallY - 31, face.id, maze.length),
+          pathLength: pathFromEntry.length
+        });
+      }
+    }
+  }
+
+  candidates.sort((a, b) => (b.score - a.score) || (b.pathLength - a.pathLength));
+  if (candidates.length < 2) return [];
+
+  const first = candidates[0];
+  const minimumGap = maze.length * 0.55;
+  const second = candidates.find((candidate) => (
+    candidate !== first &&
+    Math.hypot(candidate.cellX - first.cellX, candidate.cellY - first.cellY) >= minimumGap
+  )) || candidates[1];
+
+  const selected = [first, second].map((teleporter, index) => ({
+    ...teleporter,
+    id: index,
+    targetId: index === 0 ? 1 : 0
+  }));
+
+  for (const teleporter of selected) {
+    maze[teleporter.wallY][teleporter.wallX] = TILE_TELEPORTER;
+  }
+
+  return selected;
+}
+
 function createTorches() {
   const candidates = [];
   const faces = [
@@ -181,7 +259,7 @@ function createTorches() {
       const tile = maze[y][x];
       const nearEntry = Math.abs(x - entry.x) + Math.abs(y - entry.y) < 3;
       const nearExit = Math.abs(x - exit.x) + Math.abs(y - exit.y) < 3;
-      if (tile === TILE_WALL || tile === TILE_ENTRY || tile === TILE_EXIT || nearEntry || nearExit) continue;
+      if (isBlockingTile(tile) || tile === TILE_ENTRY || tile === TILE_EXIT || nearEntry || nearExit) continue;
 
       for (const face of faces) {
         if (maze[y + face.dy]?.[x + face.dx] !== TILE_WALL) continue;
@@ -228,7 +306,7 @@ function createWallFrames() {
       const tile = maze[y][x];
       const nearEntry = Math.abs(x - entry.x) + Math.abs(y - entry.y) < 4;
       const nearExit = Math.abs(x - exit.x) + Math.abs(y - exit.y) < 4;
-      if (tile === TILE_WALL || tile === TILE_ENTRY || tile === TILE_EXIT || nearEntry || nearExit) continue;
+      if (isBlockingTile(tile) || tile === TILE_ENTRY || tile === TILE_EXIT || nearEntry || nearExit) continue;
 
       for (const face of faces) {
         if (maze[y + face.dy]?.[x + face.dx] !== TILE_WALL) continue;
@@ -475,7 +553,7 @@ function isWall(x, y) {
   const mapX = Math.floor(x);
   const mapY = Math.floor(y);
   if (mapY < 0 || mapY >= maze.length || mapX < 0 || mapX >= maze[0].length) return true;
-  return maze[mapY][mapX] === TILE_WALL;
+  return isBlockingTile(maze[mapY][mapX]);
 }
 
 function tileAt(x, y) {
@@ -491,8 +569,12 @@ function isWalkableCell(x, y) {
     y < maze.length &&
     x >= 0 &&
     x < maze[0].length &&
-    maze[y][x] !== TILE_WALL
+    !isBlockingTile(maze[y][x])
   );
+}
+
+function isBlockingTile(tile) {
+  return tile === TILE_WALL || tile === TILE_TELEPORTER;
 }
 
 function findPath(start, goal) {
@@ -539,7 +621,7 @@ function cellKey(x, y) {
 }
 
 function canStandAt(x, y) {
-  const radius = 0.19;
+  const radius = PLAYER_COLLISION_RADIUS;
   return (
     !isWall(x - radius, y - radius) &&
     !isWall(x + radius, y - radius) &&
@@ -548,11 +630,68 @@ function canStandAt(x, y) {
   );
 }
 
+function teleporterCellAt(x, y) {
+  const radius = PLAYER_COLLISION_RADIUS;
+  const points = [
+    { x: x - radius, y: y - radius },
+    { x: x + radius, y: y - radius },
+    { x: x - radius, y: y + radius },
+    { x: x + radius, y: y + radius }
+  ];
+
+  for (const point of points) {
+    if (tileAt(point.x, point.y) !== TILE_TELEPORTER) continue;
+    return { x: Math.floor(point.x), y: Math.floor(point.y) };
+  }
+
+  return null;
+}
+
+function teleporterByWallCell(x, y) {
+  return teleporters.find((teleporter) => teleporter.wallX === x && teleporter.wallY === y);
+}
+
+function tryUseTeleporter(x, y) {
+  if (teleportCooldown > 0 || teleporters.length < 2 || won || caught) return false;
+
+  const wallCell = teleporterCellAt(x, y);
+  if (!wallCell) return false;
+
+  const source = teleporterByWallCell(wallCell.x, wallCell.y);
+  if (!source) return false;
+
+  const target = teleporters[source.targetId];
+  if (!target) return false;
+
+  const targetX = target.cellX + 0.5 + target.nx * 0.08;
+  const targetY = target.cellY + 0.5 + target.ny * 0.08;
+  if (!canStandAt(targetX, targetY)) return false;
+
+  player.x = targetX;
+  player.y = targetY;
+  player.angle = normalizeAngle(Math.atan2(target.ny, target.nx));
+  teleportCooldown = TELEPORT_COOLDOWN;
+  steps += 1;
+  stepsEl.textContent = String(steps);
+  stateEl.textContent = "Teleport";
+  updateCompassDisplay();
+  return true;
+}
+
 function movePlayer(dx, dy) {
   const oldTile = `${Math.floor(player.x)},${Math.floor(player.y)}`;
 
-  if (canStandAt(player.x + dx, player.y)) player.x += dx;
-  if (canStandAt(player.x, player.y + dy)) player.y += dy;
+  if (canStandAt(player.x + dx, player.y)) {
+    player.x += dx;
+  } else if (dx !== 0 && tryUseTeleporter(player.x + dx, player.y)) {
+    return;
+  }
+
+  if (canStandAt(player.x, player.y + dy)) {
+    player.y += dy;
+  } else if (dy !== 0 && tryUseTeleporter(player.x, player.y + dy)) {
+    return;
+  }
 
   const newTile = `${Math.floor(player.x)},${Math.floor(player.y)}`;
   if (newTile !== oldTile) {
@@ -617,8 +756,10 @@ function cardinalDirection(angle) {
 
 function update(dt) {
   const active = (code) => keys.has(code) || touchKeys.has(code);
+  const strafeMode = keys.has("AltLeft") || keys.has("AltRight");
   const turnSpeed = 2.45;
   const moveSpeed = won ? 1.35 : 2.7;
+  teleportCooldown = Math.max(0, teleportCooldown - dt);
 
   if (caught) {
     stateEl.textContent = "Attrape";
@@ -626,16 +767,29 @@ function update(dt) {
     return;
   }
 
-  if (active("ArrowLeft")) player.angle -= turnSpeed * dt;
-  if (active("ArrowRight")) player.angle += turnSpeed * dt;
+  if (!strafeMode && active("ArrowLeft")) player.angle -= turnSpeed * dt;
+  if (!strafeMode && active("ArrowRight")) player.angle += turnSpeed * dt;
 
-  let direction = 0;
-  if (active("ArrowUp")) direction += 1;
-  if (active("ArrowDown")) direction -= 1;
+  let forward = 0;
+  if (active("ArrowUp")) forward += 1;
+  if (active("ArrowDown")) forward -= 1;
 
-  if (!won && direction !== 0) {
-    const step = moveSpeed * dt * direction;
-    movePlayer(Math.cos(player.angle) * step, Math.sin(player.angle) * step);
+  let strafe = 0;
+  if (strafeMode && active("ArrowLeft")) strafe -= 1;
+  if (strafeMode && active("ArrowRight")) strafe += 1;
+
+  if (!won && (forward !== 0 || strafe !== 0)) {
+    const length = Math.hypot(forward, strafe) || 1;
+    const step = moveSpeed * dt / length;
+    const forwardX = Math.cos(player.angle);
+    const forwardY = Math.sin(player.angle);
+    const rightX = -forwardY;
+    const rightY = forwardX;
+
+    movePlayer(
+      (forwardX * forward + rightX * strafe) * step,
+      (forwardY * forward + rightY * strafe) * step
+    );
   }
 
   player.angle = normalizeAngle(player.angle);
@@ -651,7 +805,8 @@ function update(dt) {
     completeLevel();
   } else if (!won) {
     const distance = monsterThreatDistance();
-    if (distance < 3.2) stateEl.textContent = "Danger";
+    if (teleportCooldown > TELEPORT_COOLDOWN - 0.25) stateEl.textContent = "Teleport";
+    else if (distance < 3.2) stateEl.textContent = "Danger";
     else if (currentTile === TILE_EXIT && !hasKey) stateEl.textContent = "Cle requise";
     else if (hasKey) stateEl.textContent = "Cle";
     else stateEl.textContent = currentTile === TILE_ENTRY ? "Entree" : "Dedans";
@@ -990,7 +1145,7 @@ function castRay(rayDirX, rayDirY) {
       break;
     }
 
-    if (maze[mapY][mapX] === TILE_WALL) {
+    if (isBlockingTile(maze[mapY][mapX])) {
       const distance = side === 0 ? sideDistX - deltaDistX : sideDistY - deltaDistY;
       const hit = side === 0
         ? player.y + distance * rayDirY
@@ -1001,12 +1156,13 @@ function castRay(rayDirX, rayDirY) {
         mapX,
         mapY,
         side,
-        wallX: hit - Math.floor(hit)
+        wallX: hit - Math.floor(hit),
+        tile: maze[mapY][mapX]
       };
     }
   }
 
-  return { distance: 32, mapX: 0, mapY: 0, side: 0, wallX: 0.5 };
+  return { distance: 32, mapX: 0, mapY: 0, side: 0, wallX: 0.5, tile: TILE_WALL };
 }
 
 function render(now) {
@@ -1027,9 +1183,10 @@ function render(now) {
     const rayDirX = dirX + planeX * cameraX;
     const rayDirY = dirY + planeY * cameraX;
     const hit = castRay(rayDirX, rayDirY);
-    const distance = hit.distance;
-    const hitWorldX = player.x + distance * rayDirX;
-    const hitWorldY = player.y + distance * rayDirY;
+    const rawDistance = hit.distance;
+    const distance = Math.max(rawDistance, MIN_WALL_RENDER_DISTANCE);
+    const hitWorldX = player.x + rawDistance * rayDirX;
+    const hitWorldY = player.y + rawDistance * rayDirY;
     const localLight = worldLightAt(hitWorldX, hitWorldY);
     const lineHeight = Math.min(h * 2, h / distance);
     const drawStart = Math.max(0, Math.floor((h - lineHeight) / 2));
@@ -1038,11 +1195,11 @@ function render(now) {
     ctx.fillStyle = wallColor(hit, distance, localLight);
     ctx.fillRect(x, drawStart, columnWidth + 1, drawEnd - drawStart);
 
-    drawWallTexture(x, drawStart, drawEnd, columnWidth, hit, distance, localLight);
+    drawWallTexture(x, drawStart, drawEnd, columnWidth, hit, distance, localLight, now);
     drawColumnDarkness(x, drawStart, drawEnd, columnWidth, localLight);
 
     for (let fill = x; fill < x + columnWidth + 1 && fill < w; fill++) {
-      zBuffer[fill] = distance;
+      zBuffer[fill] = rawDistance;
     }
   }
 
@@ -1058,58 +1215,108 @@ function render(now) {
 }
 
 function drawWorldBackground(w, h) {
-  const ceiling = ctx.createLinearGradient(0, 0, 0, h * 0.52);
-  if (isDarkLevel()) {
-    ceiling.addColorStop(0, "#03070a");
-    ceiling.addColorStop(1, "#172631");
-  } else {
-    ceiling.addColorStop(0, "#1f3c52");
-    ceiling.addColorStop(1, "#708494");
-  }
-  ctx.fillStyle = ceiling;
+  ctx.fillStyle = isDarkLevel() ? "#071017" : "#47667a";
   ctx.fillRect(0, 0, w, h / 2);
 
-  const floor = ctx.createLinearGradient(0, h / 2, 0, h);
-  if (isDarkLevel()) {
-    floor.addColorStop(0, "#241a12");
-    floor.addColorStop(1, "#050403");
-  } else {
-    floor.addColorStop(0, "#796247");
-    floor.addColorStop(1, "#2d251e");
-  }
-  ctx.fillStyle = floor;
+  ctx.fillStyle = isDarkLevel() ? "#15100c" : "#5d4d3b";
   ctx.fillRect(0, h / 2, w, h / 2);
+}
+
+function drawCeilingTexture(w, h) {
+  const horizon = Math.floor(h / 2);
+  if (horizon <= 0) return;
+
+  const sample = Math.max(4, Math.floor(w / 420));
+  const texW = Math.max(1, Math.ceil(w / sample));
+  const texH = Math.max(1, Math.ceil(horizon / sample));
+  if (ceilingBuffer.width !== texW || ceilingBuffer.height !== texH) {
+    ceilingBuffer.width = texW;
+    ceilingBuffer.height = texH;
+  }
+
+  const dark = isDarkLevel();
+  const ceilingLight = dark ? clamp(0.34 + worldLightAt(player.x, player.y) * 0.58, 0.34, 0.92) : 1;
+  const image = ceilingBufferCtx.createImageData(texW, texH);
+  const data = image.data;
+  const dirX = Math.cos(player.angle);
+  const dirY = Math.sin(player.angle);
+  const planeLength = Math.tan(FOV / 2);
+  const planeX = -dirY * planeLength;
+  const planeY = dirX * planeLength;
+  const rayLeftX = dirX - planeX;
+  const rayLeftY = dirY - planeY;
+  const rayRightX = dirX + planeX;
+  const rayRightY = dirY + planeY;
+
+  for (let sy = 0; sy < texH; sy++) {
+    const screenY = Math.min(horizon - 1, sy * sample + sample * 0.5);
+    const p = Math.max(1, horizon - screenY);
+    const distance = Math.min(32, h * 0.5 / p);
+    const fade = clamp((distance - 12) / 20, 0, 1);
+    const stepX = distance * (rayRightX - rayLeftX) / texW;
+    const stepY = distance * (rayRightY - rayLeftY) / texW;
+    let worldX = player.x + distance * rayLeftX + stepX * 0.5;
+    let worldY = player.y + distance * rayLeftY + stepY * 0.5;
+
+    for (let sx = 0; sx < texW; sx++) {
+      const color = ceilingTextureColor(worldX, worldY, distance, fade, dark, ceilingLight);
+      const offset = (sy * texW + sx) * 4;
+      data[offset] = color.r;
+      data[offset + 1] = color.g;
+      data[offset + 2] = color.b;
+      data[offset + 3] = 255;
+      worldX += stepX;
+      worldY += stepY;
+    }
+  }
+
+  ceilingBufferCtx.putImageData(image, 0, 0);
 
   ctx.save();
-  ctx.lineWidth = 1;
-  ctx.strokeStyle = isDarkLevel() ? "rgba(255, 194, 105, 0.045)" : "rgba(255, 245, 220, 0.13)";
-  for (let i = -10; i <= 10; i++) {
-    const x = w / 2 + i * w * 0.085;
-    ctx.beginPath();
-    ctx.moveTo(w / 2, h / 2);
-    ctx.lineTo(x, h);
-    ctx.stroke();
-  }
-
-  ctx.strokeStyle = isDarkLevel() ? "rgba(0, 0, 0, 0.36)" : "rgba(20, 15, 12, 0.24)";
-  for (let y = h / 2 + 18; y < h; y += Math.max(9, (y - h / 2) * 0.18)) {
-    ctx.beginPath();
-    ctx.moveTo(0, y);
-    ctx.lineTo(w, y);
-    ctx.stroke();
-  }
-
-  ctx.strokeStyle = isDarkLevel() ? "rgba(130, 172, 196, 0.035)" : "rgba(230, 246, 255, 0.08)";
-  for (let y = 18; y < h / 2; y += 30) {
-    ctx.beginPath();
-    ctx.moveTo(0, y);
-    ctx.lineTo(w, y + 18);
-    ctx.stroke();
-  }
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(ceilingBuffer, 0, 0, texW, texH, 0, 0, w, horizon);
   ctx.restore();
 }
 
+function ceilingTextureColor(worldX, worldY, distance, fade, dark, ceilingLight) {
+  const cellX = Math.floor(worldX);
+  const cellY = Math.floor(worldY);
+  const localX = positiveMod(worldX, 1);
+  const localY = positiveMod(worldY, 1);
+  const rows = 3;
+  const columns = 3;
+  const row = Math.floor(localY * rows);
+  const stagger = row % 2 === 0 ? 0 : 0.5;
+  const brickX = localX * columns + stagger;
+  const column = Math.floor(brickX);
+  const seamX = positiveMod(brickX, 1);
+  const seamY = positiveMod(localY * rows, 1);
+  const seam = seamX < 0.04 || seamX > 0.96 || seamY < 0.04 || seamY > 0.96;
+  const blockNoise = textureNoise(cellX, cellY, row, column);
+  const grain = textureNoise(Math.floor(worldX * 13), Math.floor(worldY * 13), currentLevel, 83);
+  const crackSeed = textureNoise(cellX - 17, cellY + 23, row, column);
+  const crack = crackSeed > 0.84 && Math.abs(positiveMod(localX + localY * 0.72 + crackSeed, 1) - 0.5) < 0.035;
+  const distanceLight = clamp(1 - distance * 0.033, 0.28, 1);
+  const levelLight = dark ? ceilingLight : 1;
+  let shade = distanceLight * levelLight * (0.9 + blockNoise * 0.16 + grain * 0.075);
+  if (seam) shade *= dark ? 0.52 : 0.66;
+  if (crack) shade *= dark ? 0.38 : 0.54;
+
+  const base = dark ? [48, 61, 62] : [88, 108, 116];
+  const far = dark ? [4, 8, 10] : [90, 114, 125];
+  return {
+    r: Math.floor(base[0] * shade * (1 - fade) + far[0] * fade),
+    g: Math.floor(base[1] * shade * (1 - fade) + far[1] * fade),
+    b: Math.floor(base[2] * shade * (1 - fade) + far[2] * fade)
+  };
+}
+
 function wallColor(hit, distance, localLight = 1) {
+  if (hit.tile === TILE_TELEPORTER) return teleporterWallColor(hit, distance, localLight);
+  return brickWallColor(hit, distance, localLight);
+}
+
+function brickWallColor(hit, distance, localLight = 1) {
   const edge = hit.wallX < 0.08 || hit.wallX > 0.92 ? 0.82 : 1;
   const side = hit.side === 1 ? 0.76 : 1;
   const distanceLight = Math.max(0.34, 1 - distance * 0.062);
@@ -1121,9 +1328,30 @@ function wallColor(hit, distance, localLight = 1) {
   return `rgb(${r}, ${g}, ${b})`;
 }
 
-function drawWallTexture(x, start, end, width, hit, distance, localLight = 1) {
+function teleporterWallColor(hit, distance, localLight = 1) {
+  const portalHalfWidth = 0.28;
+  if (Math.abs(hit.wallX - 0.5) > portalHalfWidth) {
+    return brickWallColor(hit, distance, localLight);
+  }
+
+  const side = hit.side === 1 ? 0.82 : 1;
+  const distanceLight = Math.max(0.42, 1 - distance * 0.052);
+  const levelLight = isDarkLevel() ? 0.28 + localLight * 0.78 : 1;
+  const light = distanceLight * side * levelLight;
+  const r = Math.floor(48 * light);
+  const g = Math.floor(126 * light);
+  const b = Math.floor(168 * light);
+  return `rgb(${r}, ${g}, ${b})`;
+}
+
+function drawWallTexture(x, start, end, width, hit, distance, localLight = 1, now = 0) {
   const height = end - start;
   if (height <= 0) return;
+
+  if (hit.tile === TILE_TELEPORTER) {
+    drawTeleporterWallTexture(x, start, end, width, hit, distance, localLight, now);
+    return;
+  }
 
   const lightVisibility = isDarkLevel() ? 0.28 + localLight * 0.92 : 1;
   const visibility = Math.max(0.12, 1 - distance * 0.075) * lightVisibility;
@@ -1170,6 +1398,63 @@ function drawWallTexture(x, start, end, width, hit, distance, localLight = 1) {
   const edgeAlpha = Math.max(0.08, 0.28 - distance * 0.018) * lightVisibility;
   if (hit.wallX < 0.045 || hit.wallX > 0.955) {
     ctx.fillStyle = `rgba(255, 239, 190, ${edgeAlpha})`;
+    ctx.fillRect(x, start, width + 1, height);
+  }
+
+  ctx.restore();
+}
+
+function drawTeleporterWallTexture(x, start, end, width, hit, distance, localLight = 1, now = 0) {
+  const height = end - start;
+  const visibility = Math.max(0.16, 1 - distance * 0.06) * (isDarkLevel() ? 0.38 + localLight * 0.9 : 1);
+  const u = hit.wallX - 0.5;
+  const portalHalfWidth = 0.28;
+  const edgeFade = clamp((portalHalfWidth - Math.abs(u)) / 0.055, 0, 1);
+
+  if (edgeFade <= 0) {
+    drawWallTexture(x, start, end, width, { ...hit, tile: TILE_WALL }, distance, localLight, now);
+    return;
+  }
+
+  const step = Math.max(2, Math.floor(height / 150));
+  const centerY = (start + end) / 2;
+  const halfHeight = Math.max(1, height / 2);
+  const portalU = u / portalHalfWidth * 0.58;
+  const portalVisibility = visibility * edgeFade;
+  const phase = now * 0.00145 + textureNoise(hit.mapX, hit.mapY, 5, 9) * 0.18;
+  const pulse = 0.92 + Math.sin(now * 0.004 + hit.mapX * 1.7 + hit.mapY) * 0.08;
+
+  ctx.save();
+  ctx.fillStyle = `rgba(5, 20, 34, ${0.34 * portalVisibility})`;
+  ctx.fillRect(x, start, width + 1, height);
+
+  for (let y = start; y < end; y += step) {
+    const v = (y + step * 0.5 - centerY) / halfHeight;
+    const radial = Math.sqrt(portalU * portalU * 1.35 + v * v);
+    if (radial > 0.74) continue;
+
+    const ring = Math.abs(Math.sin((radial * 9.6 + phase) * Math.PI));
+    const centerPull = Math.max(0, 1 - radial / 0.74);
+    const band = ring > 0.78 ? 1 : 0;
+    const softGlow = Math.pow(centerPull, 2.2);
+    const alpha = (band * 0.42 + softGlow * 0.24) * portalVisibility * pulse;
+    if (alpha <= 0.012) continue;
+
+    ctx.fillStyle = band
+      ? `rgba(137, 245, 255, ${alpha})`
+      : `rgba(178, 92, 255, ${alpha})`;
+    ctx.fillRect(x, y, width + 1, step + 1);
+  }
+
+  const centerBand = Math.max(0, 1 - Math.abs(u) * 12);
+  if (centerBand > 0) {
+    ctx.fillStyle = `rgba(229, 255, 255, ${0.42 * centerBand * portalVisibility})`;
+    ctx.fillRect(x, start + height * 0.38, width + 1, height * 0.24);
+  }
+
+  const edgeAlpha = Math.max(0.08, 0.32 - distance * 0.018) * visibility;
+  if (Math.abs(Math.abs(u) - portalHalfWidth) < 0.018) {
+    ctx.fillStyle = `rgba(205, 255, 245, ${edgeAlpha})`;
     ctx.fillRect(x, start, width + 1, height);
   }
 
@@ -1934,7 +2219,8 @@ function drawMinimap() {
   for (let y = 0; y < rows; y++) {
     for (let x = 0; x < cols; x++) {
       const tile = maze[y][x];
-      if (tile === TILE_WALL) mapCtx.fillStyle = "#a7835d";
+      if (tile === TILE_TELEPORTER) mapCtx.fillStyle = "#2fc7d7";
+      else if (tile === TILE_WALL) mapCtx.fillStyle = "#a7835d";
       else if (tile === TILE_ENTRY) mapCtx.fillStyle = "#578cc8";
       else if (tile === TILE_EXIT) mapCtx.fillStyle = "#62d593";
       else mapCtx.fillStyle = "#25313a";
@@ -2029,21 +2315,30 @@ function setTouchKey(code, active) {
   else touchKeys.delete(code);
 }
 
+function isGameKey(code) {
+  return code.startsWith("Arrow") || code === "AltLeft" || code === "AltRight";
+}
+
 window.addEventListener("resize", resize);
 window.addEventListener("pointerdown", ensureAudio, { once: true });
 window.addEventListener("click", ensureAudio, { once: true });
 
 window.addEventListener("keydown", (event) => {
   ensureAudio();
-  if (!event.code.startsWith("Arrow")) return;
+  if (!isGameKey(event.code)) return;
   event.preventDefault();
   keys.add(event.code);
 });
 
 window.addEventListener("keyup", (event) => {
-  if (!event.code.startsWith("Arrow")) return;
+  if (!isGameKey(event.code)) return;
   event.preventDefault();
   keys.delete(event.code);
+});
+
+window.addEventListener("blur", () => {
+  keys.clear();
+  touchKeys.clear();
 });
 
 document.querySelectorAll("[data-key]").forEach((button) => {
