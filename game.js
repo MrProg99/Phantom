@@ -41,6 +41,7 @@ const MIN_WALL_RENDER_DISTANCE = 0.58;
 const WALL_FRAME_COUNT = 7;
 const WALL_FRAME_IMAGE_SRC = "images/cadre1.jpg";
 const FINAL_LEVEL = 2;
+const PLAYER_STATE_BROADCAST_INTERVAL = 1000 / 15;
 
 const keys = new Set();
 const touchKeys = new Set();
@@ -72,12 +73,44 @@ let audioReady = false;
 let heartbeatPreviewed = false;
 let heartbeatTimer = 0;
 let teleportCooldown = 0;
+let activeWorldSeed = createGameSeed();
+let worldRandomState = 1;
+let multiplayerRoomCode = "";
+let multiplayerLocalPlayerId = "";
+let multiplayerHostId = "";
+let multiplayerRole = "solo";
+let remotePlayer = null;
+let remotePlayerTarget = null;
+let lastPlayerStateBroadcast = 0;
+let lastPlayerStateKey = "";
 let wallFrameImageReady = false;
 const wallFrameImage = new Image();
 wallFrameImage.onload = () => {
   wallFrameImageReady = true;
 };
 wallFrameImage.src = WALL_FRAME_IMAGE_SRC;
+
+function createGameSeed() {
+  if (window.crypto?.getRandomValues) {
+    const values = new Uint32Array(1);
+    window.crypto.getRandomValues(values);
+    return values[0] || 1;
+  }
+  return Math.floor(Math.random() * 4294967295) || 1;
+}
+
+function resetWorldRandom(level) {
+  worldRandomState = (activeWorldSeed ^ Math.imul(level, 0x9e3779b9)) >>> 0;
+  if (!worldRandomState) worldRandomState = 0x6d2b79f5;
+}
+
+function worldRandom() {
+  worldRandomState = (worldRandomState + 0x6d2b79f5) >>> 0;
+  let value = worldRandomState;
+  value = Math.imul(value ^ (value >>> 15), value | 1);
+  value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+  return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
+}
 
 function createMaze(width = 19, height = 19) {
   const grid = Array.from({ length: height }, () => Array(width).fill(TILE_WALL));
@@ -104,7 +137,7 @@ function createMaze(width = 19, height = 19) {
       continue;
     }
 
-    const next = neighbors[Math.floor(Math.random() * neighbors.length)];
+    const next = neighbors[Math.floor(worldRandom() * neighbors.length)];
     grid[next.wallY][next.wallX] = TILE_OPEN;
     grid[next.y][next.x] = TILE_OPEN;
     stack.push({ x: next.x, y: next.y });
@@ -113,7 +146,7 @@ function createMaze(width = 19, height = 19) {
   // A few extra openings make the maze feel less like a single corridor.
   for (let y = 2; y < height - 2; y++) {
     for (let x = 2; x < width - 2; x++) {
-      if (grid[y][x] !== TILE_WALL || Math.random() > 0.09) continue;
+      if (grid[y][x] !== TILE_WALL || worldRandom() > 0.09) continue;
 
       const horizontal = grid[y][x - 1] !== TILE_WALL && grid[y][x + 1] !== TILE_WALL;
       const vertical = grid[y - 1][x] !== TILE_WALL && grid[y + 1][x] !== TILE_WALL;
@@ -127,11 +160,13 @@ function createMaze(width = 19, height = 19) {
 }
 
 function resetGame() {
+  if (!multiplayerRoomCode) activeWorldSeed = createGameSeed();
   startLevel(1);
 }
 
 function startLevel(level) {
   currentLevel = level;
+  resetWorldRandom(level);
   const size = level >= 2 ? 21 : 19;
   maze = createMaze(size, size);
   entry = { x: 1, y: 1 };
@@ -147,6 +182,7 @@ function startLevel(level) {
   hasCompass = false;
   mapRevealTimer = 0;
   mapOrbs = createMapOrbs();
+  applyMultiplayerSpawnOffset();
   keys.clear();
   touchKeys.clear();
   steps = 0;
@@ -164,6 +200,139 @@ function startLevel(level) {
   resultMessage.textContent = currentLevel >= FINAL_LEVEL ? "Sortie finale atteinte" : "Sortie atteinte";
   winBanner.classList.remove("danger-banner");
   winBanner.hidden = true;
+}
+
+function applyMultiplayerSpawnOffset() {
+  if (!multiplayerRoomCode || multiplayerRole === "solo") return;
+
+  const side = multiplayerRole === "host" ? -1 : 1;
+  const offset = 0.14 * side;
+  const shiftedX = player.x - Math.sin(player.angle) * offset;
+  const shiftedY = player.y + Math.cos(player.angle) * offset;
+  if (canStandAt(shiftedX, shiftedY)) {
+    player.x = shiftedX;
+    player.y = shiftedY;
+  }
+}
+
+function applyMultiplayerRoomState(roomState) {
+  const seed = Number(roomState?.seed) >>> 0;
+  const code = roomState?.code || "";
+  const localPlayerId = roomState?.localPlayerId || "";
+  if (!code || !localPlayerId || !seed) return;
+
+  const nextRole = roomState.hostId === localPlayerId ? "host" : "guest";
+  const sessionChanged = (
+    multiplayerRoomCode !== code ||
+    multiplayerLocalPlayerId !== localPlayerId ||
+    activeWorldSeed !== seed
+  );
+
+  multiplayerRoomCode = code;
+  multiplayerLocalPlayerId = localPlayerId;
+  multiplayerHostId = roomState.hostId || "";
+  multiplayerRole = nextRole;
+
+  if (sessionChanged) {
+    activeWorldSeed = seed;
+    remotePlayer = null;
+    remotePlayerTarget = null;
+    lastPlayerStateBroadcast = 0;
+    lastPlayerStateKey = "";
+    startLevel(1);
+  }
+
+  const remoteData = Object.values(roomState.players || {}).find((playerData) => (
+    playerData?.uid && playerData.uid !== localPlayerId
+  ));
+  const state = remoteData?.state;
+  const validState = (
+    Number.isFinite(state?.x) &&
+    Number.isFinite(state?.y) &&
+    Number.isFinite(state?.angle) &&
+    Number.isInteger(state?.level)
+  );
+
+  if (!validState || state.level !== currentLevel) {
+    remotePlayer = null;
+    remotePlayerTarget = null;
+    return;
+  }
+
+  remotePlayerTarget = {
+    uid: remoteData.uid,
+    name: remoteData.name || "Partenaire",
+    x: state.x,
+    y: state.y,
+    angle: normalizeAngle(state.angle),
+    level: state.level,
+    caught: Boolean(state.caught)
+  };
+
+  if (!remotePlayer) remotePlayer = { ...remotePlayerTarget };
+}
+
+function leaveMultiplayerSession() {
+  if (!multiplayerRoomCode) return;
+
+  multiplayerRoomCode = "";
+  multiplayerLocalPlayerId = "";
+  multiplayerHostId = "";
+  multiplayerRole = "solo";
+  remotePlayer = null;
+  remotePlayerTarget = null;
+  lastPlayerStateBroadcast = 0;
+  lastPlayerStateKey = "";
+  activeWorldSeed = createGameSeed();
+  startLevel(1);
+}
+
+function updateRemotePlayer(dt) {
+  if (!remotePlayer || !remotePlayerTarget) return;
+
+  const gap = Math.hypot(
+    remotePlayerTarget.x - remotePlayer.x,
+    remotePlayerTarget.y - remotePlayer.y
+  );
+  if (gap > 1.8) {
+    remotePlayer.x = remotePlayerTarget.x;
+    remotePlayer.y = remotePlayerTarget.y;
+  } else {
+    const blend = 1 - Math.exp(-dt * 12);
+    remotePlayer.x += (remotePlayerTarget.x - remotePlayer.x) * blend;
+    remotePlayer.y += (remotePlayerTarget.y - remotePlayer.y) * blend;
+  }
+
+  const angleDelta = normalizeAngle(remotePlayerTarget.angle - remotePlayer.angle + Math.PI) - Math.PI;
+  remotePlayer.angle = normalizeAngle(remotePlayer.angle + angleDelta * (1 - Math.exp(-dt * 14)));
+  remotePlayer.name = remotePlayerTarget.name;
+  remotePlayer.caught = remotePlayerTarget.caught;
+}
+
+function broadcastLocalPlayerState(now) {
+  if (!multiplayerRoomCode) return;
+
+  const x = Math.round(player.x * 10000) / 10000;
+  const y = Math.round(player.y * 10000) / 10000;
+  const angle = Math.round(player.angle * 10000) / 10000;
+  const stateKey = `${x}|${y}|${angle}|${currentLevel}|${caught}|${won}`;
+  const unchanged = stateKey === lastPlayerStateKey;
+  const elapsed = now - lastPlayerStateBroadcast;
+  if (elapsed < PLAYER_STATE_BROADCAST_INTERVAL || (unchanged && elapsed < 1000)) return;
+
+  lastPlayerStateBroadcast = now;
+  lastPlayerStateKey = stateKey;
+  window.dispatchEvent(new CustomEvent("laby:local-player-state", {
+    detail: {
+      roomCode: multiplayerRoomCode,
+      x,
+      y,
+      angle,
+      level: currentLevel,
+      caught,
+      won
+    }
+  }));
 }
 
 function startAngle() {
@@ -427,11 +596,11 @@ function createMazeKey() {
   const pool = candidates.length ? candidates : fallback;
   pool.sort((a, b) => (b.pathLength - a.pathLength) || (b.score - a.score));
   const topChoices = pool.slice(0, Math.max(1, Math.min(6, pool.length)));
-  const spawn = topChoices[Math.floor(Math.random() * topChoices.length)] || { x: entry.x + 1, y: entry.y };
+  const spawn = topChoices[Math.floor(worldRandom() * topChoices.length)] || { x: entry.x + 1, y: entry.y };
   return {
     x: spawn.x + 0.5,
     y: spawn.y + 0.5,
-    seed: Math.random() * Math.PI * 2
+    seed: worldRandom() * Math.PI * 2
   };
 }
 
@@ -472,11 +641,11 @@ function createMazeCompass() {
   const pool = candidates.length ? candidates : fallback;
   pool.sort((a, b) => (b.score - a.score) || (b.pathLength - a.pathLength));
   const topChoices = pool.slice(0, Math.max(1, Math.min(8, pool.length)));
-  const spawn = topChoices[Math.floor(Math.random() * topChoices.length)] || { x: entry.x + 1, y: entry.y };
+  const spawn = topChoices[Math.floor(worldRandom() * topChoices.length)] || { x: entry.x + 1, y: entry.y };
   return {
     x: spawn.x + 0.5,
     y: spawn.y + 0.5,
-    seed: Math.random() * Math.PI * 2
+    seed: worldRandom() * Math.PI * 2
   };
 }
 
@@ -523,11 +692,11 @@ function spawnMapOrb(existingOrbs = [], previous = null) {
   }
 
   const pool = candidates.length ? candidates : fallback;
-  const spawn = pool[Math.floor(Math.random() * pool.length)] || { x: entry.x + 1, y: entry.y };
+  const spawn = pool[Math.floor(worldRandom() * pool.length)] || { x: entry.x + 1, y: entry.y };
   return {
     x: spawn.x + 0.5,
     y: spawn.y + 0.5,
-    seed: Math.random() * Math.PI * 2
+    seed: worldRandom() * Math.PI * 2
   };
 }
 
@@ -755,6 +924,7 @@ function cardinalDirection(angle) {
 }
 
 function update(dt) {
+  updateRemotePlayer(dt);
   const active = (code) => keys.has(code) || touchKeys.has(code);
   const strafeMode = keys.has("AltLeft") || keys.has("AltRight");
   const turnSpeed = 2.45;
@@ -1208,6 +1378,7 @@ function render(now) {
   drawMapOrb(w, h, dirX, dirY, planeX, planeY, now);
   drawMazeKey(w, h, dirX, dirY, planeX, planeY, now);
   drawMazeCompass(w, h, dirX, dirY, planeX, planeY, now);
+  drawRemotePlayer(w, h, dirX, dirY, planeX, planeY, now);
   drawMonster(w, h, dirX, dirY, planeX, planeY, now);
   drawSprites(w, h, dirX, dirY, planeX, planeY);
   drawVignette(w, h);
@@ -2101,6 +2272,116 @@ function drawMonster(w, h, dirX, dirY, planeX, planeY, now) {
   ctx.restore();
 }
 
+function drawRemotePlayer(w, h, dirX, dirY, planeX, planeY, now) {
+  if (!remotePlayer || remotePlayer.level !== currentLevel) return;
+
+  const dx = remotePlayer.x - player.x;
+  const dy = remotePlayer.y - player.y;
+  const distance = Math.hypot(dx, dy);
+  if (distance < 0.22) return;
+
+  const projection = projectPoint(dx, dy, dirX, dirY, planeX, planeY, w);
+  if (!projection || projection.depth <= 0.08) return;
+
+  const screenX = projection.screenX;
+  if (screenX < -120 || screenX > w + 120) return;
+  const bufferIndex = Math.max(0, Math.min(w - 1, screenX));
+  if (projection.depth >= (zBuffer[bufferIndex] || Infinity) + 0.06) return;
+
+  const spriteHeight = Math.max(28, Math.min(h * 0.76, h / projection.depth * 0.58));
+  const spriteWidth = spriteHeight * 0.34;
+  const bob = Math.sin(now * 0.008 + remotePlayer.x * 2.1 + remotePlayer.y) * spriteHeight * 0.008;
+  const top = h / 2 - spriteHeight * 0.5 + bob;
+  const bottom = h / 2 + spriteHeight * 0.5 + bob;
+  const light = worldLightAt(remotePlayer.x, remotePlayer.y);
+  const alpha = remotePlayer.caught
+    ? 0.46
+    : clamp((isDarkLevel() ? 0.48 : 0.7) + light * 0.62, 0.42, 1);
+
+  ctx.save();
+  ctx.globalAlpha = alpha * 0.36;
+  ctx.globalCompositeOperation = "lighter";
+  const aura = ctx.createRadialGradient(
+    screenX,
+    top + spriteHeight * 0.36,
+    0,
+    screenX,
+    top + spriteHeight * 0.36,
+    spriteHeight * 0.42
+  );
+  aura.addColorStop(0, remotePlayer.caught ? "rgba(255, 74, 74, 0.28)" : "rgba(112, 224, 215, 0.25)");
+  aura.addColorStop(1, "rgba(83, 201, 204, 0)");
+  ctx.fillStyle = aura;
+  ctx.fillRect(
+    screenX - spriteHeight * 0.5,
+    top - spriteHeight * 0.1,
+    spriteHeight,
+    spriteHeight * 0.9
+  );
+  ctx.restore();
+
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+
+  ctx.fillStyle = "rgba(3, 5, 7, 0.42)";
+  ctx.beginPath();
+  ctx.ellipse(screenX, bottom + spriteHeight * 0.025, spriteWidth * 0.7, spriteHeight * 0.055, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.strokeStyle = "#17252a";
+  ctx.lineWidth = Math.max(3, spriteWidth * 0.2);
+  ctx.beginPath();
+  ctx.moveTo(screenX - spriteWidth * 0.18, top + spriteHeight * 0.64);
+  ctx.lineTo(screenX - spriteWidth * 0.24, bottom);
+  ctx.moveTo(screenX + spriteWidth * 0.18, top + spriteHeight * 0.64);
+  ctx.lineTo(screenX + spriteWidth * 0.24, bottom);
+  ctx.stroke();
+
+  ctx.fillStyle = remotePlayer.caught ? "#66363d" : "#315d61";
+  ctx.strokeStyle = remotePlayer.caught ? "#9c555d" : "#72c9c5";
+  ctx.lineWidth = Math.max(1, spriteWidth * 0.045);
+  ctx.beginPath();
+  ctx.moveTo(screenX - spriteWidth * 0.42, top + spriteHeight * 0.3);
+  ctx.quadraticCurveTo(screenX, top + spriteHeight * 0.2, screenX + spriteWidth * 0.42, top + spriteHeight * 0.3);
+  ctx.lineTo(screenX + spriteWidth * 0.3, top + spriteHeight * 0.7);
+  ctx.quadraticCurveTo(screenX, top + spriteHeight * 0.78, screenX - spriteWidth * 0.3, top + spriteHeight * 0.7);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.fillStyle = "#d4b08c";
+  ctx.beginPath();
+  ctx.arc(screenX, top + spriteHeight * 0.16, spriteWidth * 0.25, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = "#182126";
+  ctx.beginPath();
+  ctx.arc(screenX, top + spriteHeight * 0.12, spriteWidth * 0.27, Math.PI, Math.PI * 2);
+  ctx.fill();
+
+  const lampX = screenX + spriteWidth * 0.31;
+  const lampY = top + spriteHeight * 0.31;
+  ctx.shadowColor = remotePlayer.caught ? "#ff5c63" : "#8ff7df";
+  ctx.shadowBlur = Math.max(5, spriteWidth * 0.25);
+  ctx.fillStyle = remotePlayer.caught ? "#ff6d72" : "#c8fff0";
+  ctx.beginPath();
+  ctx.arc(lampX, lampY, Math.max(1.5, spriteWidth * 0.075), 0, Math.PI * 2);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+
+  if (spriteHeight > 46) {
+    ctx.font = `700 ${Math.max(10, Math.min(15, spriteHeight * 0.075))}px system-ui, sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "bottom";
+    ctx.fillStyle = remotePlayer.caught ? "#ff9ba0" : "#c8fff0";
+    ctx.fillText(remotePlayer.name, screenX, Math.max(18, top - spriteHeight * 0.045));
+  }
+
+  ctx.restore();
+}
+
 function drawSprites(w, h, dirX, dirY, planeX, planeY) {
   const sprites = [
     { x: entry.x + 0.5, y: entry.y + 0.5, label: "ENTREE", color: "#73b8ff", core: "#d8edff" },
@@ -2272,6 +2553,21 @@ function drawMinimap() {
     mapCtx.fill();
   }
 
+  if (remotePlayer && remotePlayer.level === currentLevel) {
+    mapCtx.save();
+    mapCtx.translate(ox + remotePlayer.x * cell, oy + remotePlayer.y * cell);
+    mapCtx.rotate(remotePlayer.angle);
+    mapCtx.fillStyle = remotePlayer.caught ? "#ff7378" : "#72e1d8";
+    mapCtx.beginPath();
+    mapCtx.moveTo(cell * 0.48, 0);
+    mapCtx.lineTo(-cell * 0.3, -cell * 0.25);
+    mapCtx.lineTo(-cell * 0.18, 0);
+    mapCtx.lineTo(-cell * 0.3, cell * 0.25);
+    mapCtx.closePath();
+    mapCtx.fill();
+    mapCtx.restore();
+  }
+
   const px = ox + player.x * cell;
   const py = oy + player.y * cell;
   mapCtx.save();
@@ -2305,6 +2601,7 @@ function loop(now) {
   const dt = Math.min(0.05, (now - lastFrame) / 1000);
   lastFrame = now;
   update(dt);
+  broadcastLocalPlayerState(now);
   updateClock(now);
   render(now);
   requestAnimationFrame(loop);
@@ -2339,6 +2636,14 @@ window.addEventListener("keyup", (event) => {
 window.addEventListener("blur", () => {
   keys.clear();
   touchKeys.clear();
+});
+
+window.addEventListener("laby:room-state", (event) => {
+  applyMultiplayerRoomState(event.detail);
+});
+
+window.addEventListener("laby:room-left", () => {
+  leaveMultiplayerSession();
 });
 
 document.querySelectorAll("[data-key]").forEach((button) => {

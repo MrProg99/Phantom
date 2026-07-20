@@ -13,7 +13,8 @@ import {
   ref,
   remove,
   runTransaction,
-  set
+  set,
+  update
 } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-database.js";
 
 const firebaseConfig = {
@@ -55,6 +56,8 @@ let disconnectRegistration = null;
 let hostMetaDisconnectRegistration = null;
 let stopRoomListener = null;
 let localPlayerIsHost = false;
+let pendingPlayerState = null;
+let playerStateWriteActive = false;
 let busy = false;
 
 function setMessage(message, isError = false) {
@@ -87,6 +90,15 @@ function generateRoomCode() {
   return code;
 }
 
+function generateGameSeed() {
+  if (window.crypto?.getRandomValues) {
+    const values = new Uint32Array(1);
+    window.crypto.getRandomValues(values);
+    return values[0] || 1;
+  }
+  return Math.floor(Math.random() * 4294967295) || 1;
+}
+
 function normalizeRoomCode(value) {
   return value
     .toUpperCase()
@@ -114,17 +126,25 @@ function updateRoomUi(code, playerCount) {
 }
 
 function resetRoomUi(message = "Mode solo") {
+  const previousRoomCode = currentRoomCode;
   currentRoomCode = "";
   currentPlayerRef = null;
   disconnectRegistration = null;
   hostMetaDisconnectRegistration = null;
   localPlayerIsHost = false;
+  pendingPlayerState = null;
   networkStateEl.textContent = "Solo";
   networkOpenButton.classList.remove("is-online");
   networkLobbyEl.hidden = false;
   networkRoomEl.hidden = true;
   roomCodeInput.value = "";
   setMessage(message);
+
+  if (previousRoomCode) {
+    window.dispatchEvent(new CustomEvent("laby:room-left", {
+      detail: { code: previousRoomCode }
+    }));
+  }
 }
 
 function publishRoomState(room) {
@@ -138,6 +158,7 @@ function publishRoomState(room) {
     detail: {
       code: currentRoomCode,
       hostId: room?.meta?.hostId || "",
+      seed: room?.meta?.seed || 0,
       localPlayerId: auth.currentUser?.uid || "",
       players
     }
@@ -236,6 +257,7 @@ async function createRoom() {
         return {
           hostId: user.uid,
           createdAt: Date.now(),
+          seed: generateGameSeed(),
           version: 1
         };
       }, { applyLocally: false });
@@ -306,6 +328,47 @@ function firebaseErrorMessage(error) {
   return error?.message || "La connexion Firebase a echoue";
 }
 
+function queuePlayerState(state) {
+  if (
+    !currentPlayerRef ||
+    state?.roomCode !== currentRoomCode ||
+    !Number.isFinite(state.x) ||
+    !Number.isFinite(state.y) ||
+    !Number.isFinite(state.angle) ||
+    !Number.isInteger(state.level)
+  ) return;
+
+  pendingPlayerState = {
+    x: state.x,
+    y: state.y,
+    angle: state.angle,
+    level: state.level,
+    caught: Boolean(state.caught),
+    won: Boolean(state.won),
+    updatedAt: Date.now()
+  };
+  flushPlayerState();
+}
+
+async function flushPlayerState() {
+  if (playerStateWriteActive || !pendingPlayerState || !currentPlayerRef) return;
+
+  const targetRef = currentPlayerRef;
+  const targetRoomCode = currentRoomCode;
+  const state = pendingPlayerState;
+  pendingPlayerState = null;
+  playerStateWriteActive = true;
+
+  try {
+    await update(targetRef, { state });
+  } catch (error) {
+    if (currentRoomCode === targetRoomCode) setMessage(firebaseErrorMessage(error), true);
+  } finally {
+    playerStateWriteActive = false;
+    if (pendingPlayerState && currentRoomCode === targetRoomCode) flushPlayerState();
+  }
+}
+
 networkOpenButton.addEventListener("click", openDialog);
 networkCloseButton.addEventListener("click", closeDialog);
 createRoomButton.addEventListener("click", createRoom);
@@ -337,6 +400,10 @@ networkDialog.addEventListener("click", (event) => {
 
 window.addEventListener("keydown", (event) => {
   if (event.code === "Escape" && !networkDialog.hidden) closeDialog();
+});
+
+window.addEventListener("laby:local-player-state", (event) => {
+  queuePlayerState(event.detail);
 });
 
 window.addEventListener("beforeunload", () => {
