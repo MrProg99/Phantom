@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Labyrinthe 3D</title>
-  <link rel="stylesheet" href="styles.css?v=teleport3">
+  <link rel="stylesheet" href="styles.css?v=firebase3">
 </head>
 <body>
   <main class="game-shell">
@@ -20,6 +20,10 @@
           <span>Cle <strong id="key-state">Non</strong></span>
           <span id="compass-panel" hidden>Dir <strong id="direction-state">--</strong></span>
           <span id="state">Entree</span>
+          <button id="network-open" class="network-chip" type="button" aria-label="Partie en ligne">
+            <span id="network-dot" class="network-dot" aria-hidden="true"></span>
+            <strong id="network-state">Solo</strong>
+          </button>
         </div>
       </div>
 
@@ -40,8 +44,42 @@
       <span>Sortie atteinte</span>
       <button id="play-again" type="button">Rejouer</button>
     </div>
+
+    <div id="network-dialog" class="network-dialog" hidden>
+      <section class="network-modal" role="dialog" aria-modal="true" aria-labelledby="network-title">
+        <header class="network-header">
+          <h2 id="network-title">Partie en ligne</h2>
+          <button id="network-close" class="network-close" type="button" aria-label="Fermer" title="Fermer">&times;</button>
+        </header>
+
+        <div id="network-lobby">
+          <button id="create-room" class="network-primary" type="button">Creer une partie</button>
+          <div class="network-divider"><span>ou</span></div>
+          <form id="join-room-form" class="join-room-form">
+            <label for="room-code-input">Code du salon</label>
+            <div class="join-room-row">
+              <input id="room-code-input" type="text" maxlength="6" autocomplete="off" spellcheck="false" placeholder="ABC234">
+              <button class="network-primary" type="submit">Rejoindre</button>
+            </div>
+          </form>
+        </div>
+
+        <div id="network-room" class="network-room" hidden>
+          <span class="network-room-label">Code du salon</span>
+          <strong id="room-code" class="room-code">------</strong>
+          <span id="room-player-count" class="room-player-count">1 joueur sur 2</span>
+          <div class="network-room-actions">
+            <button id="copy-room-code" class="network-secondary" type="button">Copier le code</button>
+            <button id="leave-room" class="network-secondary network-danger" type="button">Quitter</button>
+          </div>
+        </div>
+
+        <p id="network-message" class="network-message" role="status" aria-live="polite">Mode solo</p>
+      </section>
+    </div>
   </main>
 
-  <script src="game.js?v=teleport3"></script>
+  <script src="game.js?v=firebase3"></script>
+  <script type="module" src="network.js?v=firebase3"></script>
 </body>
 </html>
