@@ -160,7 +160,8 @@ function publishRoomState(room) {
       hostId: room?.meta?.hostId || "",
       seed: room?.meta?.seed || 0,
       localPlayerId: auth.currentUser?.uid || "",
-      players
+      players,
+      world: room?.world || {}
     }
   }));
 }
@@ -369,6 +370,29 @@ async function flushPlayerState() {
   }
 }
 
+async function shareGateState(request) {
+  if (
+    !currentPlayerRef ||
+    request?.roomCode !== currentRoomCode ||
+    request.open !== true ||
+    !Number.isInteger(request.level) ||
+    request.level < 1 ||
+    request.level > 2 ||
+    !Number.isFinite(request.seed)
+  ) return;
+
+  try {
+    await set(ref(database, `rooms/${currentRoomCode}/world/gates/${request.level}`), {
+      open: true,
+      openedBy: auth.currentUser?.uid || "",
+      seed: request.seed,
+      updatedAt: Date.now()
+    });
+  } catch (error) {
+    setMessage(firebaseErrorMessage(error), true);
+  }
+}
+
 networkOpenButton.addEventListener("click", openDialog);
 networkCloseButton.addEventListener("click", closeDialog);
 createRoomButton.addEventListener("click", createRoom);
@@ -404,6 +428,10 @@ window.addEventListener("keydown", (event) => {
 
 window.addEventListener("laby:local-player-state", (event) => {
   queuePlayerState(event.detail);
+});
+
+window.addEventListener("laby:gate-state-request", (event) => {
+  shareGateState(event.detail);
 });
 
 window.addEventListener("beforeunload", () => {

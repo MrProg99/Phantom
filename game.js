@@ -25,6 +25,7 @@ const TILE_WALL = "#";
 const TILE_ENTRY = "E";
 const TILE_EXIT = "X";
 const TILE_TELEPORTER = "T";
+const TILE_GATE = "G";
 const MONSTER_REPATH_TIME = 0.42;
 const MONSTER_WAKE_TIME = 3.2;
 const MONSTER_CATCH_DISTANCE = 0.46;
@@ -42,6 +43,9 @@ const WALL_FRAME_COUNT = 7;
 const WALL_FRAME_IMAGE_SRC = "images/cadre1.jpg";
 const FINAL_LEVEL = 2;
 const PLAYER_STATE_BROADCAST_INTERVAL = 1000 / 15;
+const GATE_OPEN_DURATION = 1.45;
+const GATE_PASSABLE_OPENNESS = 0.82;
+const GATE_INTERACTION_DISTANCE = 0.92;
 
 const keys = new Set();
 const touchKeys = new Set();
@@ -57,6 +61,7 @@ let zBuffer = [];
 let torches = [];
 let wallFrames = [];
 let teleporters = [];
+let gatePuzzle = null;
 let mapOrbs = [];
 let mazeKey = null;
 let mazeCompass = null;
@@ -79,6 +84,7 @@ let multiplayerRoomCode = "";
 let multiplayerLocalPlayerId = "";
 let multiplayerHostId = "";
 let multiplayerRole = "solo";
+let multiplayerWorldState = {};
 let remotePlayer = null;
 let remotePlayerTarget = null;
 let lastPlayerStateBroadcast = 0;
@@ -172,7 +178,9 @@ function startLevel(level) {
   entry = { x: 1, y: 1 };
   exit = { x: maze[0].length - 2, y: maze.length - 2 };
   player = { x: entry.x + 0.5, y: entry.y + 0.5, angle: startAngle() };
+  gatePuzzle = null;
   teleporters = createTeleporters();
+  gatePuzzle = createGatePuzzle();
   torches = createTorches();
   wallFrames = createWallFrames();
   monster = createMonster();
@@ -183,6 +191,7 @@ function startLevel(level) {
   mapRevealTimer = 0;
   mapOrbs = createMapOrbs();
   applyMultiplayerSpawnOffset();
+  applySharedGateState(false);
   keys.clear();
   touchKeys.clear();
   steps = 0;
@@ -232,6 +241,7 @@ function applyMultiplayerRoomState(roomState) {
   multiplayerLocalPlayerId = localPlayerId;
   multiplayerHostId = roomState.hostId || "";
   multiplayerRole = nextRole;
+  multiplayerWorldState = roomState.world || {};
 
   if (sessionChanged) {
     activeWorldSeed = seed;
@@ -241,6 +251,8 @@ function applyMultiplayerRoomState(roomState) {
     lastPlayerStateKey = "";
     startLevel(1);
   }
+
+  applySharedGateState(true);
 
   const remoteData = Object.values(roomState.players || {}).find((playerData) => (
     playerData?.uid && playerData.uid !== localPlayerId
@@ -279,12 +291,54 @@ function leaveMultiplayerSession() {
   multiplayerLocalPlayerId = "";
   multiplayerHostId = "";
   multiplayerRole = "solo";
+  multiplayerWorldState = {};
   remotePlayer = null;
   remotePlayerTarget = null;
   lastPlayerStateBroadcast = 0;
   lastPlayerStateKey = "";
   activeWorldSeed = createGameSeed();
   startLevel(1);
+}
+
+function applySharedGateState(playSound) {
+  if (!gatePuzzle || !multiplayerRoomCode) return;
+
+  const sharedState = multiplayerWorldState?.gates?.[currentLevel];
+  const belongsToSession = (Number(sharedState?.seed) >>> 0) === activeWorldSeed;
+  if (!sharedState?.open || !belongsToSession || gatePuzzle.targetOpen) return;
+
+  gatePuzzle.targetOpen = true;
+  if (playSound) playGateOpeningSound();
+}
+
+function gateLeverDistance() {
+  if (!gatePuzzle?.lever) return Infinity;
+  return Math.hypot(player.x - gatePuzzle.lever.x, player.y - gatePuzzle.lever.y);
+}
+
+function activateGateLever() {
+  if (!gatePuzzle || gatePuzzle.targetOpen || caught || won) return;
+  if (gateLeverDistance() > GATE_INTERACTION_DISTANCE) return;
+
+  gatePuzzle.targetOpen = true;
+  stateEl.textContent = "Herse";
+  playGateOpeningSound();
+
+  if (multiplayerRoomCode) {
+    window.dispatchEvent(new CustomEvent("laby:gate-state-request", {
+      detail: {
+        roomCode: multiplayerRoomCode,
+        level: currentLevel,
+        open: true,
+        seed: activeWorldSeed
+      }
+    }));
+  }
+}
+
+function updateGatePuzzle(dt) {
+  if (!gatePuzzle?.targetOpen || gatePuzzle.openness >= 1) return;
+  gatePuzzle.openness = Math.min(1, gatePuzzle.openness + dt / GATE_OPEN_DURATION);
 }
 
 function updateRemotePlayer(dt) {
@@ -412,6 +466,103 @@ function createTeleporters() {
   }
 
   return selected;
+}
+
+function createGatePuzzle() {
+  const mainPath = findPath({ x: entry.x, y: entry.y }, { x: exit.x, y: exit.y });
+  if (mainPath.length < 10) return null;
+
+  const minimumIndex = Math.max(4, Math.floor(mainPath.length * 0.36));
+  const maximumIndex = Math.min(mainPath.length - 4, Math.floor(mainPath.length * 0.72));
+  const preferredIndex = mainPath.length * 0.58;
+  const candidates = [];
+
+  for (let index = minimumIndex; index <= maximumIndex; index++) {
+    const cell = mainPath[index];
+    if (!cell || maze[cell.y]?.[cell.x] !== TILE_OPEN) continue;
+
+    const horizontalCorridor = (
+      isWalkableCell(cell.x - 1, cell.y) &&
+      isWalkableCell(cell.x + 1, cell.y) &&
+      isBlockingTile(maze[cell.y - 1]?.[cell.x]) &&
+      isBlockingTile(maze[cell.y + 1]?.[cell.x])
+    );
+    const verticalCorridor = (
+      isWalkableCell(cell.x, cell.y - 1) &&
+      isWalkableCell(cell.x, cell.y + 1) &&
+      isBlockingTile(maze[cell.y]?.[cell.x - 1]) &&
+      isBlockingTile(maze[cell.y]?.[cell.x + 1])
+    );
+    if (!horizontalCorridor && !verticalCorridor) continue;
+
+    maze[cell.y][cell.x] = TILE_GATE;
+    const blocksExit = findPath({ x: entry.x, y: entry.y }, { x: exit.x, y: exit.y }).length === 0;
+    maze[cell.y][cell.x] = TILE_OPEN;
+
+    candidates.push({
+      x: cell.x,
+      y: cell.y,
+      pathIndex: index,
+      orientation: horizontalCorridor ? "horizontal" : "vertical",
+      blocksExit,
+      score: (blocksExit ? 1000 : 0) - Math.abs(index - preferredIndex)
+    });
+  }
+
+  candidates.sort((a, b) => b.score - a.score);
+  for (const candidate of candidates) {
+    const lever = createGateLever(mainPath, candidate.pathIndex);
+    if (!lever) continue;
+
+    maze[candidate.y][candidate.x] = TILE_GATE;
+    return {
+      x: candidate.x,
+      y: candidate.y,
+      orientation: candidate.orientation,
+      blocksExit: candidate.blocksExit,
+      lever,
+      targetOpen: false,
+      openness: 0
+    };
+  }
+
+  return null;
+}
+
+function createGateLever(mainPath, gatePathIndex) {
+  const faces = [
+    { id: 1, dx: 0, dy: -1, offsetX: 0.5, offsetY: 0.08, nx: 0, ny: 1 },
+    { id: 2, dx: 0, dy: 1, offsetX: 0.5, offsetY: 0.92, nx: 0, ny: -1 },
+    { id: 3, dx: -1, dy: 0, offsetX: 0.08, offsetY: 0.5, nx: 1, ny: 0 },
+    { id: 4, dx: 1, dy: 0, offsetX: 0.92, offsetY: 0.5, nx: -1, ny: 0 }
+  ];
+  const candidates = [];
+
+  for (let distance = 3; distance <= 9; distance++) {
+    const pathIndex = gatePathIndex - distance;
+    const cell = pathIndex >= 0 ? mainPath[pathIndex] : entry;
+    if (!cell || !isWalkableCell(cell.x, cell.y)) continue;
+
+    for (const face of faces) {
+      const wallX = cell.x + face.dx;
+      const wallY = cell.y + face.dy;
+      if (maze[wallY]?.[wallX] !== TILE_WALL) continue;
+
+      candidates.push({
+        x: cell.x + face.offsetX,
+        y: cell.y + face.offsetY,
+        cellX: cell.x,
+        cellY: cell.y,
+        nx: face.nx,
+        ny: face.ny,
+        distance,
+        score: textureNoise(cell.x + 71, cell.y - 37, face.id, activeWorldSeed)
+      });
+    }
+  }
+
+  candidates.sort((a, b) => (a.distance - b.distance) || (b.score - a.score));
+  return candidates[0] || null;
 }
 
 function createTorches() {
@@ -743,6 +894,9 @@ function isWalkableCell(x, y) {
 }
 
 function isBlockingTile(tile) {
+  if (tile === TILE_GATE) {
+    return !gatePuzzle || gatePuzzle.openness < GATE_PASSABLE_OPENNESS;
+  }
   return tile === TILE_WALL || tile === TILE_TELEPORTER;
 }
 
@@ -925,6 +1079,7 @@ function cardinalDirection(angle) {
 
 function update(dt) {
   updateRemotePlayer(dt);
+  updateGatePuzzle(dt);
   const active = (code) => keys.has(code) || touchKeys.has(code);
   const strafeMode = keys.has("AltLeft") || keys.has("AltRight");
   const turnSpeed = 2.45;
@@ -976,6 +1131,7 @@ function update(dt) {
   } else if (!won) {
     const distance = monsterThreatDistance();
     if (teleportCooldown > TELEPORT_COOLDOWN - 0.25) stateEl.textContent = "Teleport";
+    else if (gateLeverDistance() <= GATE_INTERACTION_DISTANCE && !gatePuzzle?.targetOpen) stateEl.textContent = "Levier";
     else if (distance < 3.2) stateEl.textContent = "Danger";
     else if (currentTile === TILE_EXIT && !hasKey) stateEl.textContent = "Cle requise";
     else if (hasKey) stateEl.textContent = "Cle";
@@ -1268,6 +1424,57 @@ function playCaptureNoise(start) {
   source.stop(start + duration);
 }
 
+function playGateOpeningSound() {
+  if (!audioContext || !audioReady || audioContext.state === "suspended") return;
+
+  const start = audioContext.currentTime;
+  const duration = GATE_OPEN_DURATION + 0.12;
+  const oscillator = audioContext.createOscillator();
+  const filter = audioContext.createBiquadFilter();
+  const gain = audioContext.createGain();
+
+  oscillator.type = "sawtooth";
+  oscillator.frequency.setValueAtTime(92, start);
+  oscillator.frequency.linearRampToValueAtTime(54, start + duration);
+  filter.type = "lowpass";
+  filter.frequency.setValueAtTime(360, start);
+  filter.Q.setValueAtTime(4.2, start);
+  gain.gain.setValueAtTime(0.0001, start);
+  gain.gain.exponentialRampToValueAtTime(0.18, start + 0.045);
+  gain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+  oscillator.connect(filter);
+  filter.connect(gain);
+  gain.connect(audioContext.destination);
+  oscillator.start(start);
+  oscillator.stop(start + duration);
+
+  const sampleRate = audioContext.sampleRate;
+  const buffer = audioContext.createBuffer(1, Math.floor(sampleRate * duration), sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let index = 0; index < data.length; index++) {
+    const time = index / sampleRate;
+    const scrape = 0.35 + Math.abs(Math.sin(time * 31)) * 0.65;
+    const fade = 1 - time / duration;
+    data[index] = (Math.random() * 2 - 1) * scrape * fade;
+  }
+
+  const noise = audioContext.createBufferSource();
+  const noiseFilter = audioContext.createBiquadFilter();
+  const noiseGain = audioContext.createGain();
+  noise.buffer = buffer;
+  noiseFilter.type = "bandpass";
+  noiseFilter.frequency.setValueAtTime(820, start);
+  noiseFilter.Q.setValueAtTime(1.1, start);
+  noiseGain.gain.setValueAtTime(0.0001, start);
+  noiseGain.gain.exponentialRampToValueAtTime(0.1, start + 0.03);
+  noiseGain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+  noise.connect(noiseFilter);
+  noiseFilter.connect(noiseGain);
+  noiseGain.connect(audioContext.destination);
+  noise.start(start);
+  noise.stop(start + duration);
+}
+
 function normalizeAngle(angle) {
   const full = Math.PI * 2;
   return ((angle % full) + full) % full;
@@ -1283,6 +1490,7 @@ function castRay(rayDirX, rayDirY) {
   let sideDistX = 0;
   let sideDistY = 0;
   let side = 0;
+  let gateHit = null;
 
   if (rayDirX < 0) {
     stepX = -1;
@@ -1315,7 +1523,27 @@ function castRay(rayDirX, rayDirY) {
       break;
     }
 
-    if (isBlockingTile(maze[mapY][mapX])) {
+    const tile = maze[mapY][mapX];
+    if (tile === TILE_GATE) {
+      const distance = side === 0 ? sideDistX - deltaDistX : sideDistY - deltaDistY;
+      const hit = side === 0
+        ? player.y + distance * rayDirY
+        : player.x + distance * rayDirX;
+
+      if (!gateHit && gatePuzzle && gatePuzzle.openness < 1) {
+        gateHit = {
+          distance: Math.max(distance, 0.0001),
+          mapX,
+          mapY,
+          side,
+          wallX: hit - Math.floor(hit),
+          tile
+        };
+      }
+      continue;
+    }
+
+    if (isBlockingTile(tile)) {
       const distance = side === 0 ? sideDistX - deltaDistX : sideDistY - deltaDistY;
       const hit = side === 0
         ? player.y + distance * rayDirY
@@ -1327,12 +1555,13 @@ function castRay(rayDirX, rayDirY) {
         mapY,
         side,
         wallX: hit - Math.floor(hit),
-        tile: maze[mapY][mapX]
+        tile,
+        gateHit
       };
     }
   }
 
-  return { distance: 32, mapX: 0, mapY: 0, side: 0, wallX: 0.5, tile: TILE_WALL };
+  return { distance: 32, mapX: 0, mapY: 0, side: 0, wallX: 0.5, tile: TILE_WALL, gateHit };
 }
 
 function render(now) {
@@ -1347,6 +1576,7 @@ function render(now) {
   const planeY = dirX * planeLength;
   const columnWidth = Math.max(1, Math.floor(w / 380));
   zBuffer = new Array(w);
+  const gateColumns = [];
 
   for (let x = 0; x < w; x += columnWidth) {
     const cameraX = 2 * x / w - 1;
@@ -1368,6 +1598,17 @@ function render(now) {
     drawWallTexture(x, drawStart, drawEnd, columnWidth, hit, distance, localLight, now);
     drawColumnDarkness(x, drawStart, drawEnd, columnWidth, localLight);
 
+    if (hit.gateHit) {
+      const gateWorldX = player.x + hit.gateHit.distance * rayDirX;
+      const gateWorldY = player.y + hit.gateHit.distance * rayDirY;
+      gateColumns.push({
+        x,
+        columnWidth,
+        hit: hit.gateHit,
+        localLight: worldLightAt(gateWorldX, gateWorldY)
+      });
+    }
+
     for (let fill = x; fill < x + columnWidth + 1 && fill < w; fill++) {
       zBuffer[fill] = rawDistance;
     }
@@ -1375,14 +1616,64 @@ function render(now) {
 
   drawWallFrames(w, h, dirX, dirY, planeX, planeY);
   drawTorches(w, h, dirX, dirY, planeX, planeY, now);
+  drawGateLever(w, h, dirX, dirY, planeX, planeY, now);
   drawMapOrb(w, h, dirX, dirY, planeX, planeY, now);
   drawMazeKey(w, h, dirX, dirY, planeX, planeY, now);
   drawMazeCompass(w, h, dirX, dirY, planeX, planeY, now);
   drawRemotePlayer(w, h, dirX, dirY, planeX, planeY, now);
   drawMonster(w, h, dirX, dirY, planeX, planeY, now);
   drawSprites(w, h, dirX, dirY, planeX, planeY);
+  drawGateOverlays(gateColumns, h);
   drawVignette(w, h);
   drawMinimap();
+}
+
+function drawGateOverlays(columns, h) {
+  if (!gatePuzzle || !columns.length || gatePuzzle.openness >= 1) return;
+
+  for (const column of columns) {
+    const distance = Math.max(column.hit.distance, MIN_WALL_RENDER_DISTANCE);
+    const lineHeight = Math.min(h * 2, h / distance);
+    const baseStart = (h - lineHeight) / 2;
+    const baseEnd = (h + lineHeight) / 2;
+    const shift = lineHeight * gatePuzzle.openness;
+    const shiftedStart = baseStart - shift;
+    const shiftedEnd = baseEnd - shift;
+    const drawStart = Math.max(0, baseStart, shiftedStart);
+    const drawEnd = Math.min(h, baseEnd, shiftedEnd);
+    if (drawEnd <= drawStart) continue;
+
+    const u = column.hit.wallX;
+    const barPhase = (u * 7) % 1;
+    const edgePost = u < 0.055 || u > 0.945;
+    const verticalBar = edgePost || barPhase < 0.19;
+    const visibility = clamp(0.34 + column.localLight * 0.82 - distance * 0.012, 0.2, 0.94);
+    const width = column.columnWidth + 1;
+
+    if (verticalBar) {
+      ctx.fillStyle = `rgba(20, 17, 14, ${0.86 * visibility})`;
+      ctx.fillRect(column.x, drawStart, width, drawEnd - drawStart);
+      ctx.fillStyle = `rgba(142, 126, 99, ${0.66 * visibility})`;
+      ctx.fillRect(column.x, drawStart, Math.max(1, width * 0.34), drawEnd - drawStart);
+      if (edgePost) {
+        ctx.fillStyle = `rgba(32, 27, 21, ${0.72 * visibility})`;
+        ctx.fillRect(column.x, drawStart, width, drawEnd - drawStart);
+      }
+    }
+
+    for (const bracePosition of [0.27, 0.69]) {
+      const braceY = shiftedStart + lineHeight * bracePosition;
+      const braceHeight = Math.max(3, lineHeight * 0.052);
+      const clippedY = Math.max(baseStart, braceY);
+      const clippedBottom = Math.min(baseEnd, braceY + braceHeight);
+      if (clippedBottom <= clippedY || clippedBottom <= 0 || clippedY >= h) continue;
+
+      ctx.fillStyle = `rgba(24, 20, 16, ${0.9 * visibility})`;
+      ctx.fillRect(column.x, clippedY, width, clippedBottom - clippedY);
+      ctx.fillStyle = `rgba(157, 137, 104, ${0.55 * visibility})`;
+      ctx.fillRect(column.x, clippedY, width, Math.max(1, braceHeight * 0.22));
+    }
+  }
 }
 
 function drawWorldBackground(w, h) {
@@ -2091,6 +2382,97 @@ function projectPoint(dx, dy, dirX, dirY, planeX, planeY, screenW) {
   };
 }
 
+function drawGateLever(w, h, dirX, dirY, planeX, planeY, now) {
+  if (!gatePuzzle?.lever) return;
+
+  const lever = gatePuzzle.lever;
+  const toPlayerX = player.x - lever.x;
+  const toPlayerY = player.y - lever.y;
+  const facing = toPlayerX * lever.nx + toPlayerY * lever.ny;
+  if (facing <= 0.015) return;
+
+  const dx = lever.x - player.x;
+  const dy = lever.y - player.y;
+  const projection = projectPoint(dx, dy, dirX, dirY, planeX, planeY, w);
+  if (!projection || projection.depth <= 0.08) return;
+
+  const screenX = projection.screenX;
+  if (screenX < -90 || screenX > w + 90) return;
+  const bufferIndex = Math.max(0, Math.min(w - 1, screenX));
+  if (projection.depth >= (zBuffer[bufferIndex] || Infinity) + 0.14) return;
+
+  const size = Math.max(15, Math.min(h * 0.28, h / projection.depth * 0.19));
+  const centerY = h / 2 + size * 0.02;
+  const light = worldLightAt(lever.x, lever.y);
+  const near = gateLeverDistance() <= GATE_INTERACTION_DISTANCE;
+  const alpha = clamp(0.48 + light * 0.8 - projection.depth * 0.018, 0.34, 1);
+  const pulse = near && !gatePuzzle.targetOpen ? 0.7 + Math.sin(now * 0.006) * 0.16 : 0;
+
+  ctx.save();
+  ctx.globalAlpha = alpha;
+
+  if (pulse > 0) {
+    ctx.globalCompositeOperation = "lighter";
+    const glow = ctx.createRadialGradient(screenX, centerY, 0, screenX, centerY, size * 0.9);
+    glow.addColorStop(0, `rgba(255, 194, 91, ${0.2 * pulse})`);
+    glow.addColorStop(1, "rgba(255, 160, 55, 0)");
+    ctx.fillStyle = glow;
+    ctx.fillRect(screenX - size, centerY - size, size * 2, size * 2);
+    ctx.globalCompositeOperation = "source-over";
+  }
+
+  const plateWidth = size * 0.46;
+  const plateHeight = size * 0.7;
+  ctx.fillStyle = "#17130f";
+  ctx.strokeStyle = "#8c7455";
+  ctx.lineWidth = Math.max(1.2, size * 0.035);
+  ctx.fillRect(screenX - plateWidth / 2, centerY - plateHeight / 2, plateWidth, plateHeight);
+  ctx.strokeRect(screenX - plateWidth / 2, centerY - plateHeight / 2, plateWidth, plateHeight);
+
+  ctx.fillStyle = "#4e4030";
+  for (const side of [-1, 1]) {
+    for (const vertical of [-1, 1]) {
+      ctx.beginPath();
+      ctx.arc(
+        screenX + side * plateWidth * 0.34,
+        centerY + vertical * plateHeight * 0.36,
+        Math.max(1, size * 0.025),
+        0,
+        Math.PI * 2
+      );
+      ctx.fill();
+    }
+  }
+
+  const leverAngle = -0.72 + gatePuzzle.openness * 1.34;
+  const pivotY = centerY + size * 0.14;
+  const handleLength = size * 0.5;
+  const handleX = screenX + Math.sin(leverAngle) * handleLength;
+  const handleY = pivotY - Math.cos(leverAngle) * handleLength;
+  ctx.strokeStyle = "#241a11";
+  ctx.lineWidth = Math.max(4, size * 0.12);
+  ctx.beginPath();
+  ctx.moveTo(screenX, pivotY);
+  ctx.lineTo(handleX, handleY);
+  ctx.stroke();
+  ctx.strokeStyle = "#a27846";
+  ctx.lineWidth = Math.max(2, size * 0.055);
+  ctx.beginPath();
+  ctx.moveTo(screenX, pivotY);
+  ctx.lineTo(handleX, handleY);
+  ctx.stroke();
+
+  ctx.fillStyle = gatePuzzle.targetOpen ? "#5f8c72" : "#b64e3f";
+  ctx.strokeStyle = "#2a1712";
+  ctx.lineWidth = Math.max(1, size * 0.025);
+  ctx.beginPath();
+  ctx.arc(handleX, handleY, Math.max(3, size * 0.105), 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.restore();
+}
+
 function drawTorchHalo(x, y, height, pulse, alpha) {
   ctx.save();
   ctx.globalCompositeOperation = "lighter";
@@ -2500,7 +2882,8 @@ function drawMinimap() {
   for (let y = 0; y < rows; y++) {
     for (let x = 0; x < cols; x++) {
       const tile = maze[y][x];
-      if (tile === TILE_TELEPORTER) mapCtx.fillStyle = "#2fc7d7";
+      if (tile === TILE_GATE) mapCtx.fillStyle = gatePuzzle?.openness >= GATE_PASSABLE_OPENNESS ? "#668778" : "#958268";
+      else if (tile === TILE_TELEPORTER) mapCtx.fillStyle = "#2fc7d7";
       else if (tile === TILE_WALL) mapCtx.fillStyle = "#a7835d";
       else if (tile === TILE_ENTRY) mapCtx.fillStyle = "#578cc8";
       else if (tile === TILE_EXIT) mapCtx.fillStyle = "#62d593";
@@ -2513,6 +2896,19 @@ function drawMinimap() {
   for (const torch of torches) {
     mapCtx.beginPath();
     mapCtx.arc(ox + torch.x * cell, oy + torch.y * cell, Math.max(1.4, cell * 0.22), 0, Math.PI * 2);
+    mapCtx.fill();
+  }
+
+  if (gatePuzzle?.lever) {
+    mapCtx.fillStyle = gatePuzzle.targetOpen ? "#6fbd91" : "#e1a44f";
+    mapCtx.beginPath();
+    mapCtx.arc(
+      ox + gatePuzzle.lever.x * cell,
+      oy + gatePuzzle.lever.y * cell,
+      Math.max(1.8, cell * 0.28),
+      0,
+      Math.PI * 2
+    );
     mapCtx.fill();
   }
 
@@ -2613,7 +3009,7 @@ function setTouchKey(code, active) {
 }
 
 function isGameKey(code) {
-  return code.startsWith("Arrow") || code === "AltLeft" || code === "AltRight";
+  return code.startsWith("Arrow") || code === "AltLeft" || code === "AltRight" || code === "Space";
 }
 
 window.addEventListener("resize", resize);
@@ -2624,6 +3020,10 @@ window.addEventListener("keydown", (event) => {
   ensureAudio();
   if (!isGameKey(event.code)) return;
   event.preventDefault();
+  if (event.code === "Space") {
+    if (!event.repeat) activateGateLever();
+    return;
+  }
   keys.add(event.code);
 });
 

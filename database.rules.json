@@ -21,6 +21,14 @@
           "$other": {
             ".validate": false
           }
+        },
+        "world": {
+          "gates": {
+            "$level": {
+              ".write": "auth != null && (root.child('rooms').child($roomCode).child('players/host/uid').val() === auth.uid || root.child('rooms').child($roomCode).child('players/guest/uid').val() === auth.uid)",
+              ".validate": "($level === '1' || $level === '2') && newData.hasChildren(['open', 'openedBy', 'seed', 'updatedAt']) && newData.child('open').val() === true && newData.child('openedBy').val() === auth.uid && newData.child('seed').isNumber() && newData.child('seed').val() === root.child('rooms').child($roomCode).child('meta/seed').val() && newData.child('updatedAt').isNumber()"
+            }
+          }
         }
       }
     }
